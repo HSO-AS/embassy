@@ -39,8 +39,10 @@ pub struct Config {
     pub frequency: Frequency,
     pub sda_high_drive: bool,
     pub sda_pullup: bool,
+    pub sda_sens_disable: bool,
     pub scl_high_drive: bool,
     pub scl_pullup: bool,
+    pub scl_sens_disable: bool,
 }
 
 impl Default for Config {
@@ -51,6 +53,8 @@ impl Default for Config {
             sda_pullup: false,
             sda_high_drive: false,
             scl_pullup: false,
+            sda_sens_disable: false,
+            scl_sens_disable: false,
         }
     }
 }
@@ -101,6 +105,9 @@ impl<'d, T: Instance> Twim<'d, T> {
             if config.sda_pullup {
                 w.pull().pullup();
             }
+            if config.sda_sens_disable {
+                w.sense().disabled();
+            }
             w
         });
         scl.conf().write(|w| {
@@ -113,6 +120,9 @@ impl<'d, T: Instance> Twim<'d, T> {
             }
             if config.scl_pullup {
                 w.pull().pullup();
+            }
+            if config.scl_sens_disable {
+                w.sense().disabled();
             }
             w
         });
