@@ -142,7 +142,7 @@ impl<'d, T: Instance> Twim<'d, T> {
 
         // Configure frequency.
         r.frequency
-            .write(|w| unsafe { w.frequency().bits(config.frequency as u32) });
+            .write(|w| unsafe { w.frequency().variant(config.frequency) });
 
         // Disable all events interrupts
         r.intenclr.write(|w| unsafe { w.bits(0xFFFF_FFFF) });
