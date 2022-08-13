@@ -128,8 +128,14 @@ impl<'d, T: Instance> Twim<'d, T> {
         });
 
         // Select pins.
-        r.psel.sda.write(|w| unsafe { w.bits(sda.psel_bits()) });
-        r.psel.scl.write(|w| unsafe { w.bits(scl.psel_bits()) });
+        r.psel.sda.write(|w| {
+            unsafe { w.bits(sda.psel_bits()) };
+            w.connect().connected()
+        });
+        r.psel.scl.write(|w| {
+            unsafe { w.bits(scl.psel_bits()) };
+            w.connect().connected()
+        });
 
         // Enable TWIM instance.
         r.enable.write(|w| w.enable().enabled());
