@@ -5,7 +5,7 @@ use core::task::{Context, Poll};
 
 use embassy_cortex_m::interrupt::{Interrupt, InterruptExt};
 use embassy_hal_common::{impl_peripheral, into_ref, PeripheralRef};
-use embassy_util::waitqueue::AtomicWaker;
+use embassy_sync::waitqueue::AtomicWaker;
 
 use crate::pac::common::{Reg, RW};
 use crate::pac::SIO;
@@ -189,7 +189,7 @@ impl<'d, T: Pin> InputFuture<'d, T> {
         unsafe {
             let irq = interrupt::IO_IRQ_BANK0::steal();
             irq.disable();
-            irq.set_priority(interrupt::Priority::P6);
+            irq.set_priority(interrupt::Priority::P3);
 
             // Each INTR register is divided into 8 groups, one group for each
             // pin, and each group consists of LEVEL_LOW, LEVEL_HIGH, EDGE_LOW,
@@ -433,7 +433,7 @@ impl<'d, T: Pin> Flex<'d, T> {
             });
 
             pin.io().ctrl().write(|w| {
-                w.set_funcsel(pac::io::vals::Gpio0CtrlFuncsel::SIO_0.0);
+                w.set_funcsel(pac::io::vals::Gpio0ctrlFuncsel::SIO_0.0);
             });
         }
 
@@ -586,7 +586,7 @@ impl<'d, T: Pin> Drop for Flex<'d, T> {
         unsafe {
             self.pin.pad_ctrl().write(|_| {});
             self.pin.io().ctrl().write(|w| {
-                w.set_funcsel(pac::io::vals::Gpio0CtrlFuncsel::NULL.0);
+                w.set_funcsel(pac::io::vals::Gpio0ctrlFuncsel::NULL.0);
             });
         }
     }

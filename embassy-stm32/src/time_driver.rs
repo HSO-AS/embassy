@@ -4,10 +4,10 @@ use core::sync::atomic::{compiler_fence, Ordering};
 use core::{mem, ptr};
 
 use atomic_polyfill::{AtomicU32, AtomicU8};
-use embassy_executor::time::driver::{AlarmHandle, Driver};
-use embassy_executor::time::TICKS_PER_SECOND;
-use embassy_util::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_util::blocking_mutex::Mutex;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::blocking_mutex::Mutex;
+use embassy_time::driver::{AlarmHandle, Driver};
+use embassy_time::TICK_HZ;
 use stm32_metapac::timer::regs;
 
 use crate::interrupt::{CriticalSection, InterruptExt};
@@ -133,7 +133,7 @@ struct RtcDriver {
 
 const ALARM_STATE_NEW: AlarmState = AlarmState::new();
 
-embassy_executor::time_driver_impl!(static DRIVER: RtcDriver = RtcDriver {
+embassy_time::time_driver_impl!(static DRIVER: RtcDriver = RtcDriver {
     period: AtomicU32::new(0),
     alarm_count: AtomicU8::new(0),
     alarms: Mutex::const_new(CriticalSectionRawMutex::new(), [ALARM_STATE_NEW; ALARM_COUNT]),
@@ -153,7 +153,7 @@ impl RtcDriver {
             r.cr1().modify(|w| w.set_cen(false));
             r.cnt().write(|w| w.set_cnt(0));
 
-            let psc = timer_freq.0 / TICKS_PER_SECOND as u32 - 1;
+            let psc = timer_freq.0 / TICK_HZ as u32 - 1;
             let psc: u16 = match psc.try_into() {
                 Err(_) => panic!("psc division overflow: {}", psc),
                 Ok(n) => n,
