@@ -74,7 +74,7 @@ pub mod buffered_uarte;
 pub mod gpio;
 #[cfg(feature = "gpiote")]
 pub mod gpiote;
-#[cfg(not(any(feature = "_nrf5340", feature = "_nrf9160")))]
+#[cfg(not(any(feature = "_nrf5340")))]
 pub mod nvmc;
 pub mod ppi;
 #[cfg(not(any(feature = "nrf52805", feature = "nrf52820", feature = "_nrf5340-net")))]

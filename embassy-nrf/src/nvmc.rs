@@ -55,6 +55,37 @@ impl<'d> Nvmc<'d> {
         let p = Self::regs();
         while p.ready.read().ready().is_busy() {}
     }
+
+    #[cfg(feature = "_nrf9160")]
+    fn erasepage(&mut self, page: u32) -> Result<(), Error> {
+        if page as usize > FLASH_SIZE {
+            return Err(Error::OutOfBounds);
+        }
+        if page as usize % 4 != 0 {
+            return Err(Error::Unaligned);
+        }
+
+        let p = Self::regs();
+
+        #[cfg(feature = "nrf9160-s")]
+        p.config.write(|w| w.wen().een());
+
+        #[cfg(feature = "nrf9160-ns")]
+        p.configns.write(|w| w.wen().een());
+
+        self.wait_ready();
+
+        let bytes = u32::MAX;
+        unsafe {
+            let p_dst = page as *mut u32;
+            ptr::write_volatile(p_dst, bytes);
+        }
+
+        p.config.reset();
+        self.wait_ready();
+
+        Ok(())
+    }
 }
 
 impl<'d> MultiwriteNorFlash for Nvmc<'d> {}
@@ -99,6 +130,9 @@ impl<'d> NorFlash for Nvmc<'d> {
         self.wait_ready();
 
         for page in (from..to).step_by(PAGE_SIZE) {
+            #[cfg(feature = "_nrf9160")]
+            self.erasepage(page)?;
+            #[cfg(not(feature = "_nrf9160"))]
             p.erasepage().write(|w| unsafe { w.bits(page) });
             self.wait_ready();
         }
