@@ -177,6 +177,9 @@ embassy_hal_common::peripherals! {
     // WDT
     WDT,
 
+    // NVMC
+    NVMC,
+
     // UARTE, TWI & SPI
     UARTETWISPI0,
     UARTETWISPI1,

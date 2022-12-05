@@ -10,8 +10,12 @@ use embedded_storage::nor_flash::{
 use crate::peripherals::NVMC;
 use crate::{pac, Peripheral};
 
+#[cfg(not(feature = "_nrf5340-net"))]
 /// Erase size of NVMC flash in bytes.
 pub const PAGE_SIZE: usize = 4096;
+#[cfg(feature = "_nrf5340-net")]
+/// Erase size of NVMC flash in bytes.
+pub const PAGE_SIZE: usize = 2048;
 
 /// Size of NVMC flash in bytes.
 pub const FLASH_SIZE: usize = crate::chip::FLASH_SIZE;
@@ -56,35 +60,54 @@ impl<'d> Nvmc<'d> {
         while p.ready.read().ready().is_busy() {}
     }
 
-    #[cfg(feature = "_nrf9160")]
-    fn erasepage(&mut self, page: u32) -> Result<(), Error> {
-        if page as usize > FLASH_SIZE {
-            return Err(Error::OutOfBounds);
-        }
-        if page as usize % 4 != 0 {
-            return Err(Error::Unaligned);
-        }
+    #[cfg(not(any(feature = "_nrf9160", feature = "_nrf5340")))]
+    fn wait_ready_write(&mut self) {
+        self.wait_ready();
+    }
 
+    #[cfg(any(feature = "_nrf9160", feature = "_nrf5340"))]
+    fn wait_ready_write(&mut self) {
         let p = Self::regs();
+        while p.readynext.read().readynext().is_busy() {}
+    }
 
-        #[cfg(feature = "nrf9160-s")]
-        p.config.write(|w| w.wen().een());
+    #[cfg(not(any(feature = "_nrf9160", feature = "_nrf5340")))]
+    fn erase_page(&mut self, page: u32) {
+        Self::regs().erasepage().write(|w| unsafe { w.bits(page) });
+    }
 
-        #[cfg(feature = "nrf9160-ns")]
-        p.configns.write(|w| w.wen().een());
+    #[cfg(any(feature = "_nrf9160", feature = "_nrf5340"))]
+    fn erase_page(&mut self, page: u32) {
+        #[cfg(not(feature = "_nrf5340-net"))]
+        const FLASH_START_ADDR: u32 = 0;
+        #[cfg(feature = "_nrf5340-net")]
+        const FLASH_START_ADDR: u32 = 0x100_0000;
 
-        self.wait_ready();
-
-        let bytes = u32::MAX;
+        let first_page_word = (FLASH_START_ADDR + page * PAGE_SIZE as u32) as *mut u32;
         unsafe {
-            let p_dst = page as *mut u32;
-            ptr::write_volatile(p_dst, bytes);
+            first_page_word.write_volatile(0xFFFF_FFFF);
         }
+    }
 
-        p.config.reset();
-        self.wait_ready();
+    fn enable_erase(&self) {
+        #[cfg(not(any(feature = "nrf5340-app-ns", feature = "nrf9160-ns")))]
+        Self::regs().config.write(|w| w.wen().een());
+        #[cfg(any(feature = "nrf5340-app-ns", feature = "nrf9160-ns"))]
+        Self::regs().configns.write(|w| w.wen().een());
+    }
 
-        Ok(())
+    fn enable_read(&self) {
+        #[cfg(not(any(feature = "nrf5340-app-ns", feature = "nrf9160-ns")))]
+        Self::regs().config.write(|w| w.wen().ren());
+        #[cfg(any(feature = "nrf5340-app-ns", feature = "nrf9160-ns"))]
+        Self::regs().configns.write(|w| w.wen().ren());
+    }
+
+    fn enable_write(&self) {
+        #[cfg(not(any(feature = "nrf5340-app-ns", feature = "nrf9160-ns")))]
+        Self::regs().config.write(|w| w.wen().wen());
+        #[cfg(any(feature = "nrf5340-app-ns", feature = "nrf9160-ns"))]
+        Self::regs().configns.write(|w| w.wen().wen());
     }
 }
 
@@ -124,20 +147,15 @@ impl<'d> NorFlash for Nvmc<'d> {
             return Err(Error::Unaligned);
         }
 
-        let p = Self::regs();
-
-        p.config.write(|w| w.wen().een());
+        self.enable_erase();
         self.wait_ready();
 
         for page in (from..to).step_by(PAGE_SIZE) {
-            #[cfg(feature = "_nrf9160")]
-            self.erasepage(page)?;
-            #[cfg(not(feature = "_nrf9160"))]
-            p.erasepage().write(|w| unsafe { w.bits(page) });
+            self.erase_page(page);
             self.wait_ready();
         }
 
-        p.config.reset();
+        self.enable_read();
         self.wait_ready();
 
         Ok(())
@@ -151,9 +169,7 @@ impl<'d> NorFlash for Nvmc<'d> {
             return Err(Error::Unaligned);
         }
 
-        let p = Self::regs();
-
-        p.config.write(|w| w.wen().wen());
+        self.enable_write();
         self.wait_ready();
 
         unsafe {
@@ -163,11 +179,11 @@ impl<'d> NorFlash for Nvmc<'d> {
             for i in 0..words {
                 let w = ptr::read_unaligned(p_src.add(i));
                 ptr::write_volatile(p_dst.add(i), w);
-                self.wait_ready();
+                self.wait_ready_write();
             }
         }
 
-        p.config.reset();
+        self.enable_read();
         self.wait_ready();
 
         Ok(())

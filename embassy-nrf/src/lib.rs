@@ -43,11 +43,7 @@
 //! mutable slices always reside in RAM.
 
 #![no_std]
-#![cfg_attr(
-    feature = "nightly",
-    feature(type_alias_impl_trait, async_fn_in_trait, impl_trait_projections)
-)]
-#![cfg_attr(feature = "nightly", allow(incomplete_features))]
+#![cfg_attr(feature = "nightly", feature(type_alias_impl_trait))]
 
 #[cfg(not(any(
     feature = "nrf51",
@@ -78,7 +74,6 @@ pub mod buffered_uarte;
 pub mod gpio;
 #[cfg(feature = "gpiote")]
 pub mod gpiote;
-#[cfg(not(any(feature = "_nrf5340")))]
 pub mod nvmc;
 #[cfg(any(
     feature = "nrf52810",
