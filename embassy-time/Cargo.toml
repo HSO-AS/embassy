@@ -44,7 +44,7 @@ generic-queue = []
 # Set the number of timers for the generic queue.
 #
 # At most 1 `generic-queue-*` feature can be enabled. If none is enabled, a default of 64 timers is used.
-# 
+#
 # When using embassy-time from libraries, you should *not* enable any `generic-queue-*` feature, to allow the
 # end user to pick.
 generic-queue-8 = ["generic-queue"]
@@ -56,7 +56,7 @@ generic-queue-128 = ["generic-queue"]
 # Set the `embassy_time` tick rate.
 #
 # At most 1 `tick-*` feature can be enabled. If none is enabled, a default of 1MHz is used.
-# 
+#
 # If the time driver in use supports using arbitrary tick rates, you can enable one `tick-*`
 # feature from your binary crate to set the tick rate. The driver will use configured tick rate.
 # If the time driver supports a fixed tick rate, it will enable one feature itself, so you should
@@ -131,6 +131,7 @@ tick-hz-768_000_000 = []
 [dependencies]
 defmt = { version = "0.3", optional = true }
 log = { version = "0.4.14", optional = true }
+tracing = { version = "0.1", optional = true, default-features = false, features = ["attributes"] }
 
 embedded-hal-02 = { package = "embedded-hal", version = "0.2.6" }
 embedded-hal-1 = { package = "embedded-hal", version = "=1.0.0-alpha.9", optional = true}

@@ -145,6 +145,8 @@ macro_rules! info {
 macro_rules! warn {
     ($s:literal $(, $x:expr)* $(,)?) => {
         {
+            #[cfg(feature = "tracing")]
+            ::tracing::warn!($s $(, $x)*);
             #[cfg(feature = "log")]
             ::log::warn!($s $(, $x)*);
             #[cfg(feature = "defmt")]
