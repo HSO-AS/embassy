@@ -55,6 +55,10 @@ pub struct Config {
     /// read will abort, the error reported and cleared
     /// if false, the error is ignored and cleared
     pub detect_previous_overrun: bool,
+
+    /// Clock frequency for the internal clock that is used to create the baudrate etc.
+    /// defaults to PCLK clock
+    pub clock_frequency: Option<Hertz>,
 }
 
 impl Default for Config {
@@ -66,6 +70,7 @@ impl Default for Config {
             parity: Parity::ParityNone,
             // historical behavior
             detect_previous_overrun: false,
+            clock_frequency: None,
         }
     }
 }
@@ -159,7 +164,7 @@ impl<'d, T: BasicInstance, TxDma> UartTx<'d, T, TxDma> {
             tx.set_as_af(tx.af_num(), AFType::OutputPushPull);
         }
 
-        configure(r, &config, T::frequency(), T::MULTIPLIER, false, true);
+        configure(r, &config, config.clock_frequency.unwrap_or(T::frequency()), T::MULTIPLIER, false, true);
 
         // create state once!
         let _s = T::state();
@@ -261,7 +266,7 @@ impl<'d, T: BasicInstance, RxDma> UartRx<'d, T, RxDma> {
             rx.set_as_af(rx.af_num(), AFType::Input);
         }
 
-        configure(r, &config, T::frequency(), T::MULTIPLIER, true, false);
+        configure(r, &config, config.clock_frequency.unwrap_or(T::frequency()), T::MULTIPLIER, true, false);
 
         irq.set_handler(Self::on_interrupt);
         irq.unpend();
@@ -664,7 +669,7 @@ impl<'d, T: BasicInstance, TxDma, RxDma> Uart<'d, T, TxDma, RxDma> {
             tx.set_as_af(tx.af_num(), AFType::OutputPushPull);
         }
 
-        configure(r, &config, T::frequency(), T::MULTIPLIER, true, true);
+        configure(r, &config, config.clock_frequency.unwrap_or(T::frequency()), T::MULTIPLIER, true, true);
 
         irq.set_handler(UartRx::<T, RxDma>::on_interrupt);
         irq.unpend();
