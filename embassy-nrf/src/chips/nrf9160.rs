@@ -41,7 +41,7 @@ pub mod pac {
         vmc_ns as vmc,
         wdt_ns as wdt,
     };
-    
+
     #[cfg(feature = "nrf9160-ns")]
     #[doc(no_inline)]
     pub use nrf9160_pac::{
@@ -58,7 +58,8 @@ pub mod pac {
         I2S_NS as I2S,
         IPC_NS as IPC,
         KMU_NS as KMU,
-        NVMC_NS as NVMC,
+        // For some reason, this fixed NVMC inn ns mode for me
+        NVMC_S as NVMC,
         P0_NS as P0,
         PDM_NS as PDM,
         POWER_NS as POWER,
@@ -176,9 +177,6 @@ embassy_hal_common::peripherals! {
 
     // WDT
     WDT,
-
-    // NVMC
-    NVMC,
 
     // UARTE, TWI & SPI
     UARTETWISPI0,

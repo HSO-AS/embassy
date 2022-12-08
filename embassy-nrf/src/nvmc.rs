@@ -78,14 +78,10 @@ impl<'d> Nvmc<'d> {
 
     #[cfg(any(feature = "_nrf9160", feature = "_nrf5340"))]
     fn erase_page(&mut self, page: u32) {
-        #[cfg(not(feature = "_nrf5340-net"))]
-        const FLASH_START_ADDR: u32 = 0;
-        #[cfg(feature = "_nrf5340-net")]
-        const FLASH_START_ADDR: u32 = 0x100_0000;
-
-        let first_page_word = (FLASH_START_ADDR + page * PAGE_SIZE as u32) as *mut u32;
+        let bytes = u32::MAX;
+        let first_page_word = page as *mut u32;
         unsafe {
-            first_page_word.write_volatile(0xFFFF_FFFF);
+            first_page_word.write_volatile(bytes);
         }
     }
 
@@ -93,21 +89,23 @@ impl<'d> Nvmc<'d> {
         #[cfg(not(any(feature = "nrf5340-app-ns", feature = "nrf9160-ns")))]
         Self::regs().config.write(|w| w.wen().een());
         #[cfg(any(feature = "nrf5340-app-ns", feature = "nrf9160-ns"))]
-        Self::regs().configns.write(|w| w.wen().een());
+        Self::regs().config.write(|w| w.wen().een());
     }
 
     fn enable_read(&self) {
         #[cfg(not(any(feature = "nrf5340-app-ns", feature = "nrf9160-ns")))]
         Self::regs().config.write(|w| w.wen().ren());
         #[cfg(any(feature = "nrf5340-app-ns", feature = "nrf9160-ns"))]
-        Self::regs().configns.write(|w| w.wen().ren());
+        Self::regs().config.write(|w| w.wen().ren());
+        // This should be the configns register, but that does not work for me
+        // Self::regs().configns.write(|w| w.wen().ren());
     }
 
     fn enable_write(&self) {
         #[cfg(not(any(feature = "nrf5340-app-ns", feature = "nrf9160-ns")))]
         Self::regs().config.write(|w| w.wen().wen());
         #[cfg(any(feature = "nrf5340-app-ns", feature = "nrf9160-ns"))]
-        Self::regs().configns.write(|w| w.wen().wen());
+        Self::regs().config.write(|w| w.wen().wen());
     }
 }
 
