@@ -72,16 +72,15 @@ impl<'d> Nvmc<'d> {
     }
 
     #[cfg(not(any(feature = "_nrf9160", feature = "_nrf5340")))]
-    fn erase_page(&mut self, page: u32) {
-        Self::regs().erasepage().write(|w| unsafe { w.bits(page) });
+    fn erase_page(&mut self, page_addr: u32) {
+        Self::regs().erasepage().write(|w| unsafe { w.bits(page_addr) });
     }
 
     #[cfg(any(feature = "_nrf9160", feature = "_nrf5340"))]
-    fn erase_page(&mut self, page: u32) {
-        let bytes = u32::MAX;
-        let first_page_word = page as *mut u32;
+    fn erase_page(&mut self, page_addr: u32) {
+        let first_page_word = page_addr as *mut u32;
         unsafe {
-            first_page_word.write_volatile(bytes);
+            first_page_word.write_volatile(0xFFFF_FFFF);
         }
     }
 
@@ -89,23 +88,21 @@ impl<'d> Nvmc<'d> {
         #[cfg(not(any(feature = "nrf5340-app-ns", feature = "nrf9160-ns")))]
         Self::regs().config.write(|w| w.wen().een());
         #[cfg(any(feature = "nrf5340-app-ns", feature = "nrf9160-ns"))]
-        Self::regs().config.write(|w| w.wen().een());
+        Self::regs().configns.write(|w| w.wen().een());
     }
 
     fn enable_read(&self) {
         #[cfg(not(any(feature = "nrf5340-app-ns", feature = "nrf9160-ns")))]
         Self::regs().config.write(|w| w.wen().ren());
         #[cfg(any(feature = "nrf5340-app-ns", feature = "nrf9160-ns"))]
-        Self::regs().config.write(|w| w.wen().ren());
-        // This should be the configns register, but that does not work for me
-        // Self::regs().configns.write(|w| w.wen().ren());
+        Self::regs().configns.write(|w| w.wen().ren());
     }
 
     fn enable_write(&self) {
         #[cfg(not(any(feature = "nrf5340-app-ns", feature = "nrf9160-ns")))]
         Self::regs().config.write(|w| w.wen().wen());
         #[cfg(any(feature = "nrf5340-app-ns", feature = "nrf9160-ns"))]
-        Self::regs().config.write(|w| w.wen().wen());
+        Self::regs().configns.write(|w| w.wen().wen());
     }
 }
 
@@ -148,8 +145,8 @@ impl<'d> NorFlash for Nvmc<'d> {
         self.enable_erase();
         self.wait_ready();
 
-        for page in (from..to).step_by(PAGE_SIZE) {
-            self.erase_page(page);
+        for page_addr in (from..to).step_by(PAGE_SIZE) {
+            self.erase_page(page_addr);
             self.wait_ready();
         }
 
