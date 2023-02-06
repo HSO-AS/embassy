@@ -1,3 +1,5 @@
+//! CDC-ACM class implementation, aka Serial over USB.
+
 use core::cell::Cell;
 use core::mem::{self, MaybeUninit};
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -18,7 +20,6 @@ const CDC_PROTOCOL_NONE: u8 = 0x00;
 
 const CS_INTERFACE: u8 = 0x24;
 const CDC_TYPE_HEADER: u8 = 0x00;
-const CDC_TYPE_CALL_MANAGEMENT: u8 = 0x01;
 const CDC_TYPE_ACM: u8 = 0x02;
 const CDC_TYPE_UNION: u8 = 0x06;
 
@@ -29,12 +30,14 @@ const REQ_SET_LINE_CODING: u8 = 0x20;
 const REQ_GET_LINE_CODING: u8 = 0x21;
 const REQ_SET_CONTROL_LINE_STATE: u8 = 0x22;
 
+/// Internal state for CDC-ACM
 pub struct State<'a> {
     control: MaybeUninit<Control<'a>>,
     shared: ControlShared,
 }
 
 impl<'a> State<'a> {
+    /// Create a new `State`.
     pub fn new() -> Self {
         Self {
             control: MaybeUninit::uninit(),
@@ -172,7 +175,7 @@ impl<'d, D: Driver<'d>> CdcAcmClass<'d, D> {
         iface.handler(control);
         let comm_if = iface.interface_number();
         let data_if = u8::from(comm_if) + 1;
-        let mut alt = iface.alt_setting(USB_CLASS_CDC, CDC_SUBCLASS_ACM, CDC_PROTOCOL_NONE);
+        let mut alt = iface.alt_setting(USB_CLASS_CDC, CDC_SUBCLASS_ACM, CDC_PROTOCOL_NONE, None);
 
         alt.descriptor(
             CS_INTERFACE,
@@ -186,7 +189,10 @@ impl<'d, D: Driver<'d>> CdcAcmClass<'d, D> {
             CS_INTERFACE,
             &[
                 CDC_TYPE_ACM, // bDescriptorSubtype
-                0x00,         // bmCapabilities
+                0x02,         // bmCapabilities:
+                              // D1: Device supports the request combination of
+                              // Set_Line_Coding, Set_Control_Line_State, Get_Line_Coding,
+                              // and the Notification Serial_State.
             ],
         );
         alt.descriptor(
@@ -197,21 +203,13 @@ impl<'d, D: Driver<'d>> CdcAcmClass<'d, D> {
                 data_if.into(), // bSubordinateInterface
             ],
         );
-        alt.descriptor(
-            CS_INTERFACE,
-            &[
-                CDC_TYPE_CALL_MANAGEMENT, // bDescriptorSubtype
-                0x00,                     // bmCapabilities
-                data_if.into(),           // bDataInterface
-            ],
-        );
 
         let comm_ep = alt.endpoint_interrupt_in(8, 255);
 
         // Data interface
         let mut iface = func.interface();
         let data_if = iface.interface_number();
-        let mut alt = iface.alt_setting(USB_CLASS_CDC_DATA, 0x00, CDC_PROTOCOL_NONE);
+        let mut alt = iface.alt_setting(USB_CLASS_CDC_DATA, 0x00, CDC_PROTOCOL_NONE, None);
         let read_ep = alt.endpoint_bulk_out(max_packet_size);
         let write_ep = alt.endpoint_bulk_in(max_packet_size);
 
@@ -290,10 +288,15 @@ impl From<u8> for StopBits {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum ParityType {
+    /// No parity bit.
     None = 0,
+    /// Parity bit is 1 if the amount of `1` bits in the data byte is odd.
     Odd = 1,
+    /// Parity bit is 1 if the amount of `1` bits in the data byte is even.
     Even = 2,
+    /// Parity bit is always 1
     Mark = 3,
+    /// Parity bit is always 0
     Space = 4,
 }
 

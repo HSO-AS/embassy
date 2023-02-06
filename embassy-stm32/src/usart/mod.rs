@@ -410,7 +410,7 @@ impl<'d, T: BasicInstance, RxDma> UartRx<'d, T, RxDma> {
         let r = T::regs();
 
         // make sure USART state is restored to neutral state when this future is dropped
-        let _drop = OnDrop::new(move || {
+        let on_drop = OnDrop::new(move || {
             // defmt::trace!("Clear all USART interrupts and DMA Read Request");
             // clear all interrupts and DMA Rx Request
             // SAFETY: only clears Rx related flags
@@ -568,7 +568,7 @@ impl<'d, T: BasicInstance, RxDma> UartRx<'d, T, RxDma> {
         // wait for the first of DMA request or idle line detected to completes
         // select consumes its arguments
         // when transfer is dropped, it will stop the DMA request
-        match select(transfer, idle).await {
+        let r = match select(transfer, idle).await {
             // DMA transfer completed first
             Either::First(()) => Ok(ReadCompletionEvent::DmaCompleted),
 
@@ -577,7 +577,11 @@ impl<'d, T: BasicInstance, RxDma> UartRx<'d, T, RxDma> {
 
             // error occurred
             Either::Second(Err(e)) => Err(e),
-        }
+        };
+
+        drop(on_drop);
+
+        r
     }
 
     async fn inner_read(&mut self, buffer: &mut [u8], enable_idle_line_detection: bool) -> Result<usize, Error>
@@ -911,6 +915,58 @@ mod eh1 {
 
         fn flush(&mut self) -> nb::Result<(), Self::Error> {
             self.blocking_flush().map_err(nb::Error::Other)
+        }
+    }
+}
+
+#[cfg(all(feature = "unstable-traits", feature = "nightly"))]
+mod eio {
+    use embedded_io::asynch::Write;
+    use embedded_io::Io;
+
+    use super::*;
+
+    impl<T, TxDma, RxDma> Io for Uart<'_, T, TxDma, RxDma>
+    where
+        T: BasicInstance,
+    {
+        type Error = Error;
+    }
+
+    impl<T, TxDma, RxDma> Write for Uart<'_, T, TxDma, RxDma>
+    where
+        T: BasicInstance,
+        TxDma: super::TxDma<T>,
+    {
+        async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+            self.write(buf).await?;
+            Ok(buf.len())
+        }
+
+        async fn flush(&mut self) -> Result<(), Self::Error> {
+            self.blocking_flush()
+        }
+    }
+
+    impl<T, TxDma> Io for UartTx<'_, T, TxDma>
+    where
+        T: BasicInstance,
+    {
+        type Error = Error;
+    }
+
+    impl<T, TxDma> Write for UartTx<'_, T, TxDma>
+    where
+        T: BasicInstance,
+        TxDma: super::TxDma<T>,
+    {
+        async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+            self.write(buf).await?;
+            Ok(buf.len())
+        }
+
+        async fn flush(&mut self) -> Result<(), Self::Error> {
+            self.blocking_flush()
         }
     }
 }

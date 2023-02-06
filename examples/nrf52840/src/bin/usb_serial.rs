@@ -4,16 +4,14 @@
 
 use core::mem;
 
-use defmt::*;
+use defmt::{info, panic};
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
-use embassy_nrf::usb::{Driver, PowerUsb};
+use embassy_nrf::usb::{Driver, HardwareVbusDetect, Instance, VbusDetect};
 use embassy_nrf::{interrupt, pac};
-use embassy_time::{Duration, Timer};
-use embassy_usb::class::hid::{HidWriter, ReportId, RequestHandler, State};
-use embassy_usb::control::OutResponse;
+use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
+use embassy_usb::driver::EndpointError;
 use embassy_usb::{Builder, Config};
-use usbd_hid::descriptor::{MouseReport, SerializedDescriptor};
 use {defmt_rtt as _, panic_probe as _};
 
 #[embassy_executor::main]
@@ -28,15 +26,22 @@ async fn main(_spawner: Spawner) {
     // Create the driver, from the HAL.
     let irq = interrupt::take!(USBD);
     let power_irq = interrupt::take!(POWER_CLOCK);
-    let driver = Driver::new(p.USBD, irq, PowerUsb::new(power_irq));
+    let driver = Driver::new(p.USBD, irq, HardwareVbusDetect::new(power_irq));
 
     // Create embassy-usb Config
     let mut config = Config::new(0xc0de, 0xcafe);
     config.manufacturer = Some("Embassy");
-    config.product = Some("HID mouse example");
+    config.product = Some("USB-serial example");
     config.serial_number = Some("12345678");
     config.max_power = 100;
     config.max_packet_size_0 = 64;
+
+    // Required for windows compatiblity.
+    // https://developer.nordicsemi.com/nRF_Connect_SDK/doc/1.9.1/kconfig/CONFIG_CDC_ACM_IAD.html#help
+    config.device_class = 0xEF;
+    config.device_sub_class = 0x02;
+    config.device_protocol = 0x01;
+    config.composite_with_iads = true;
 
     // Create embassy-usb DeviceBuilder using the driver and config.
     // It needs some buffers for building the descriptors.
@@ -44,7 +49,6 @@ async fn main(_spawner: Spawner) {
     let mut config_descriptor = [0; 256];
     let mut bos_descriptor = [0; 256];
     let mut control_buf = [0; 64];
-    let request_handler = MyRequestHandler {};
 
     let mut state = State::new();
 
@@ -59,14 +63,7 @@ async fn main(_spawner: Spawner) {
     );
 
     // Create classes on the builder.
-    let config = embassy_usb::class::hid::Config {
-        report_descriptor: MouseReport::desc(),
-        request_handler: Some(&request_handler),
-        poll_ms: 60,
-        max_packet_size: 8,
-    };
-
-    let mut writer = HidWriter::<_, 5>::new(&mut builder, &mut state, config);
+    let mut class = CdcAcmClass::new(&mut builder, &mut state, 64);
 
     // Build the builder.
     let mut usb = builder.build();
@@ -75,50 +72,39 @@ async fn main(_spawner: Spawner) {
     let usb_fut = usb.run();
 
     // Do stuff with the class!
-    let hid_fut = async {
-        let mut y: i8 = 5;
+    let echo_fut = async {
         loop {
-            Timer::after(Duration::from_millis(500)).await;
-
-            y = -y;
-            let report = MouseReport {
-                buttons: 0,
-                x: 0,
-                y,
-                wheel: 0,
-                pan: 0,
-            };
-            match writer.write_serialize(&report).await {
-                Ok(()) => {}
-                Err(e) => warn!("Failed to send report: {:?}", e),
-            }
+            class.wait_connection().await;
+            info!("Connected");
+            let _ = echo(&mut class).await;
+            info!("Disconnected");
         }
     };
 
     // Run everything concurrently.
     // If we had made everything `'static` above instead, we could do this using separate tasks instead.
-    join(usb_fut, hid_fut).await;
+    join(usb_fut, echo_fut).await;
 }
 
-struct MyRequestHandler {}
+struct Disconnected {}
 
-impl RequestHandler for MyRequestHandler {
-    fn get_report(&self, id: ReportId, _buf: &mut [u8]) -> Option<usize> {
-        info!("Get report for {:?}", id);
-        None
+impl From<EndpointError> for Disconnected {
+    fn from(val: EndpointError) -> Self {
+        match val {
+            EndpointError::BufferOverflow => panic!("Buffer overflow"),
+            EndpointError::Disabled => Disconnected {},
+        }
     }
+}
 
-    fn set_report(&self, id: ReportId, data: &[u8]) -> OutResponse {
-        info!("Set report for {:?}: {=[u8]}", id, data);
-        OutResponse::Accepted
-    }
-
-    fn set_idle_ms(&self, id: Option<ReportId>, dur: u32) {
-        info!("Set idle rate for {:?} to {:?}", id, dur);
-    }
-
-    fn get_idle_ms(&self, id: Option<ReportId>) -> Option<u32> {
-        info!("Get idle rate for {:?}", id);
-        None
+async fn echo<'d, T: Instance + 'd, P: VbusDetect + 'd>(
+    class: &mut CdcAcmClass<'d, Driver<'d, T, P>>,
+) -> Result<(), Disconnected> {
+    let mut buf = [0; 64];
+    loop {
+        let n = class.read_packet(&mut buf).await?;
+        let data = &buf[..n];
+        info!("data: {:x}", data);
+        class.write_packet(data).await?;
     }
 }

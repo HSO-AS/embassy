@@ -2,39 +2,37 @@
 #![no_main]
 #![feature(type_alias_impl_trait)]
 
-use core::mem;
-
-use defmt::{info, panic};
+use defmt::{panic, *};
 use embassy_executor::Spawner;
-use embassy_futures::join::join;
-use embassy_nrf::usb::{Driver, Instance, PowerUsb, UsbSupply};
-use embassy_nrf::{interrupt, pac};
+use embassy_stm32::time::mhz;
+use embassy_stm32::usb_otg::{Driver, Instance};
+use embassy_stm32::{interrupt, Config};
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use embassy_usb::driver::EndpointError;
-use embassy_usb::{Builder, Config};
+use embassy_usb::Builder;
+use futures::future::join;
 use {defmt_rtt as _, panic_probe as _};
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
-    let p = embassy_nrf::init(Default::default());
-    let clock: pac::CLOCK = unsafe { mem::transmute(()) };
+    info!("Hello World!");
 
-    info!("Enabling ext hfosc...");
-    clock.tasks_hfclkstart.write(|w| unsafe { w.bits(1) });
-    while clock.events_hfclkstarted.read().bits() != 1 {}
+    let mut config = Config::default();
+    config.rcc.pll48 = true;
+    config.rcc.sys_ck = Some(mhz(48));
+
+    let p = embassy_stm32::init(config);
 
     // Create the driver, from the HAL.
-    let irq = interrupt::take!(USBD);
-    let power_irq = interrupt::take!(POWER_CLOCK);
-    let driver = Driver::new(p.USBD, irq, PowerUsb::new(power_irq));
+    let irq = interrupt::take!(OTG_FS);
+    let mut ep_out_buffer = [0u8; 256];
+    let driver = Driver::new_fs(p.USB_OTG_FS, irq, p.PA12, p.PA11, &mut ep_out_buffer);
 
     // Create embassy-usb Config
-    let mut config = Config::new(0xc0de, 0xcafe);
+    let mut config = embassy_usb::Config::new(0xc0de, 0xcafe);
     config.manufacturer = Some("Embassy");
     config.product = Some("USB-serial example");
     config.serial_number = Some("12345678");
-    config.max_power = 100;
-    config.max_packet_size_0 = 64;
 
     // Required for windows compatiblity.
     // https://developer.nordicsemi.com/nRF_Connect_SDK/doc/1.9.1/kconfig/CONFIG_CDC_ACM_IAD.html#help
@@ -97,9 +95,7 @@ impl From<EndpointError> for Disconnected {
     }
 }
 
-async fn echo<'d, T: Instance + 'd, P: UsbSupply + 'd>(
-    class: &mut CdcAcmClass<'d, Driver<'d, T, P>>,
-) -> Result<(), Disconnected> {
+async fn echo<'d, T: Instance + 'd>(class: &mut CdcAcmClass<'d, Driver<'d, T>>) -> Result<(), Disconnected> {
     let mut buf = [0; 64];
     loop {
         let n = class.read_packet(&mut buf).await?;

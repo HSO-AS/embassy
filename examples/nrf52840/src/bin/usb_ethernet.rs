@@ -9,7 +9,7 @@ use embassy_executor::Spawner;
 use embassy_net::tcp::TcpSocket;
 use embassy_net::{Stack, StackResources};
 use embassy_nrf::rng::Rng;
-use embassy_nrf::usb::{Driver, PowerUsb};
+use embassy_nrf::usb::{Driver, HardwareVbusDetect};
 use embassy_nrf::{interrupt, pac, peripherals};
 use embassy_usb::class::cdc_ncm::embassy_net::{Device, Runner, State as NetState};
 use embassy_usb::class::cdc_ncm::{CdcNcmClass, State};
@@ -18,7 +18,7 @@ use embedded_io::asynch::Write;
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
-type MyDriver = Driver<'static, peripherals::USBD, PowerUsb>;
+type MyDriver = Driver<'static, peripherals::USBD, HardwareVbusDetect>;
 
 macro_rules! singleton {
     ($val:expr) => {{
@@ -58,7 +58,7 @@ async fn main(spawner: Spawner) {
     // Create the driver, from the HAL.
     let irq = interrupt::take!(USBD);
     let power_irq = interrupt::take!(POWER_CLOCK);
-    let driver = Driver::new(p.USBD, irq, PowerUsb::new(power_irq));
+    let driver = Driver::new(p.USBD, irq, HardwareVbusDetect::new(power_irq));
 
     // Create embassy-usb Config
     let mut config = Config::new(0xc0de, 0xcafe);
@@ -101,8 +101,8 @@ async fn main(spawner: Spawner) {
     let (runner, device) = class.into_embassy_net_device::<MTU, 4, 4>(singleton!(NetState::new()), our_mac_addr);
     unwrap!(spawner.spawn(usb_ncm_task(runner)));
 
-    let config = embassy_net::ConfigStrategy::Dhcp;
-    //let config = embassy_net::ConfigStrategy::Static(embassy_net::Config {
+    let config = embassy_net::Config::Dhcp(Default::default());
+    //let config = embassy_net::Config::Static(embassy_net::StaticConfig {
     //    address: Ipv4Cidr::new(Ipv4Address::new(10, 42, 0, 61), 24),
     //    dns_servers: Vec::new(),
     //    gateway: Some(Ipv4Address::new(10, 42, 0, 1)),
@@ -115,12 +115,7 @@ async fn main(spawner: Spawner) {
     let seed = u64::from_le_bytes(seed);
 
     // Init network stack
-    let stack = &*singleton!(Stack::new(
-        device,
-        config,
-        singleton!(StackResources::<1, 2, 8>::new()),
-        seed
-    ));
+    let stack = &*singleton!(Stack::new(device, config, singleton!(StackResources::<2>::new()), seed));
 
     unwrap!(spawner.spawn(net_task(stack)));
 

@@ -1,5 +1,7 @@
 #![no_std]
 #![feature(type_alias_impl_trait)]
+#![doc = include_str!("../README.md")]
+#![warn(missing_docs)]
 
 // This mod MUST go first, so that the others see its macros.
 pub(crate) mod fmt;
@@ -46,10 +48,13 @@ pub enum UsbDeviceState {
     Configured,
 }
 
+/// Error returned by [`UsbDevice::remote_wakeup`].
 #[derive(PartialEq, Eq, Copy, Clone, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum RemoteWakeupError {
+    /// The USB device is not suspended, or remote wakeup was not enabled.
     InvalidState,
+    /// The underlying driver doesn't support remote wakeup.
     Unsupported,
 }
 
@@ -65,6 +70,7 @@ pub const CONFIGURATION_NONE: u8 = 0;
 /// The bConfiguration value for the single configuration supported by this device.
 pub const CONFIGURATION_VALUE: u8 = 1;
 
+/// Maximum interface count, configured at compile time.
 pub const MAX_INTERFACE_COUNT: usize = 4;
 
 const STRING_INDEX_MANUFACTURER: u8 = 1;
@@ -100,6 +106,7 @@ struct Interface<'d> {
     num_strings: u8,
 }
 
+/// Main struct for the USB device stack.
 pub struct UsbDevice<'d, D: Driver<'d>> {
     control_buf: &'d mut [u8],
     control: D::ControlPipe,
@@ -122,10 +129,9 @@ struct Inner<'d, D: Driver<'d>> {
 
     /// Our device address, or 0 if none.
     address: u8,
-    /// When receiving a set addr control request, we have to apply it AFTER we've
-    /// finished handling the control request, as the status stage still has to be
-    /// handled with addr 0.
-    /// If true, do a set_addr after finishing the current control req.
+    /// SET_ADDRESS requests have special handling depending on the driver.
+    /// This flag indicates that requests must be handled by `ControlPipe::accept_set_address()`
+    /// instead of regular `accept()`.
     set_address_pending: bool,
 
     interfaces: Vec<Interface<'d>, MAX_INTERFACE_COUNT>,
@@ -254,11 +260,6 @@ impl<'d, D: Driver<'d>> UsbDevice<'d, D> {
             Direction::In => self.handle_control_in(req).await,
             Direction::Out => self.handle_control_out(req).await,
         }
-
-        if self.inner.set_address_pending {
-            self.inner.bus.set_address(self.inner.address);
-            self.inner.set_address_pending = false;
-        }
     }
 
     async fn handle_control_in(&mut self, req: Request) {
@@ -328,7 +329,14 @@ impl<'d, D: Driver<'d>> UsbDevice<'d, D> {
         trace!("  control out data: {:02x?}", data);
 
         match self.inner.handle_control_out(req, data) {
-            OutResponse::Accepted => self.control.accept().await,
+            OutResponse::Accepted => {
+                if self.inner.set_address_pending {
+                    self.control.accept_set_address(self.inner.address).await;
+                    self.inner.set_address_pending = false;
+                } else {
+                    self.control.accept().await
+                }
+            }
             OutResponse::Rejected => self.control.reject().await,
         }
     }
@@ -488,7 +496,6 @@ impl<'d, D: Driver<'d>> Inner<'d, D> {
                         .unwrap();
 
                         // TODO check it is valid (not out of range)
-                        // TODO actually enable/disable endpoints.
 
                         if let Some(handler) = &mut iface.handler {
                             handler.set_alternate_setting(new_altsetting);
@@ -655,7 +662,7 @@ impl<'d, D: Driver<'d>> Inner<'d, D> {
                         buf[1] = descriptor_type::STRING;
                         let mut pos = 2;
                         for c in s.encode_utf16() {
-                            if pos >= buf.len() {
+                            if pos + 2 >= buf.len() {
                                 panic!("control buffer too small");
                             }
 
