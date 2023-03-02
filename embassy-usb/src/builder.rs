@@ -1,10 +1,12 @@
 use heapless::Vec;
 
-use crate::control::ControlHandler;
+use crate::config::*;
 use crate::descriptor::{BosWriter, DescriptorWriter};
 use crate::driver::{Driver, Endpoint, EndpointType};
+#[cfg(feature = "msos-descriptor")]
+use crate::msos::{DeviceLevelDescriptor, FunctionLevelDescriptor, MsOsDescriptorWriter};
 use crate::types::*;
-use crate::{DeviceStateHandler, Interface, UsbDevice, MAX_INTERFACE_COUNT, STRING_INDEX_CUSTOM_START};
+use crate::{Handler, Interface, UsbDevice, MAX_INTERFACE_COUNT, STRING_INDEX_CUSTOM_START};
 
 #[derive(Debug, Copy, Clone)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -120,8 +122,8 @@ impl<'a> Config<'a> {
 /// [`UsbDevice`] builder.
 pub struct Builder<'d, D: Driver<'d>> {
     config: Config<'d>,
-    handler: Option<&'d dyn DeviceStateHandler>,
-    interfaces: Vec<Interface<'d>, MAX_INTERFACE_COUNT>,
+    handlers: Vec<&'d mut dyn Handler, MAX_HANDLER_COUNT>,
+    interfaces: Vec<Interface, MAX_INTERFACE_COUNT>,
     control_buf: &'d mut [u8],
 
     driver: D,
@@ -130,6 +132,9 @@ pub struct Builder<'d, D: Driver<'d>> {
     device_descriptor: DescriptorWriter<'d>,
     config_descriptor: DescriptorWriter<'d>,
     bos_descriptor: BosWriter<'d>,
+
+    #[cfg(feature = "msos-descriptor")]
+    msos_descriptor: MsOsDescriptorWriter<'d>,
 }
 
 impl<'d, D: Driver<'d>> Builder<'d, D> {
@@ -144,8 +149,8 @@ impl<'d, D: Driver<'d>> Builder<'d, D> {
         device_descriptor_buf: &'d mut [u8],
         config_descriptor_buf: &'d mut [u8],
         bos_descriptor_buf: &'d mut [u8],
+        #[cfg(feature = "msos-descriptor")] msos_descriptor_buf: &'d mut [u8],
         control_buf: &'d mut [u8],
-        handler: Option<&'d dyn DeviceStateHandler>,
     ) -> Self {
         // Magic values specified in USB-IF ECN on IADs.
         if config.composite_with_iads
@@ -173,32 +178,40 @@ impl<'d, D: Driver<'d>> Builder<'d, D> {
 
         Builder {
             driver,
-            handler,
             config,
             interfaces: Vec::new(),
+            handlers: Vec::new(),
             control_buf,
             next_string_index: STRING_INDEX_CUSTOM_START,
 
             device_descriptor,
             config_descriptor,
             bos_descriptor,
+
+            #[cfg(feature = "msos-descriptor")]
+            msos_descriptor: MsOsDescriptorWriter::new(msos_descriptor_buf),
         }
     }
 
     /// Creates the [`UsbDevice`] instance with the configuration in this builder.
     pub fn build(mut self) -> UsbDevice<'d, D> {
+        #[cfg(feature = "msos-descriptor")]
+        let msos_descriptor = self.msos_descriptor.build(&mut self.bos_descriptor);
+
         self.config_descriptor.end_configuration();
         self.bos_descriptor.end_bos();
 
         UsbDevice::build(
             self.driver,
             self.config,
-            self.handler,
+            self.handlers,
             self.device_descriptor.into_buf(),
             self.config_descriptor.into_buf(),
             self.bos_descriptor.writer.into_buf(),
             self.interfaces,
             self.control_buf,
+            #[cfg(feature = "msos-descriptor")]
+            msos_descriptor,
         )
     }
 
@@ -215,14 +228,10 @@ impl<'d, D: Driver<'d>> Builder<'d, D> {
     ///
     /// If it's not set, no IAD descriptor is added.
     pub fn function(&mut self, class: u8, subclass: u8, protocol: u8) -> FunctionBuilder<'_, 'd, D> {
+        let first_interface = InterfaceNumber::new(self.interfaces.len() as u8);
         let iface_count_index = if self.config.composite_with_iads {
-            self.config_descriptor.iad(
-                InterfaceNumber::new(self.interfaces.len() as _),
-                0,
-                class,
-                subclass,
-                protocol,
-            );
+            self.config_descriptor
+                .iad(first_interface, 0, class, subclass, protocol);
 
             Some(self.config_descriptor.position() - 5)
         } else {
@@ -232,7 +241,51 @@ impl<'d, D: Driver<'d>> Builder<'d, D> {
         FunctionBuilder {
             builder: self,
             iface_count_index,
+
+            #[cfg(feature = "msos-descriptor")]
+            first_interface,
         }
+    }
+
+    /// Add a Handler.
+    ///
+    /// The Handler is called on some USB bus events, and to handle all control requests not already
+    /// handled by the USB stack.
+    pub fn handler(&mut self, handler: &'d mut dyn Handler) {
+        if self.handlers.push(handler).is_err() {
+            panic!(
+                "embassy-usb: handler list full. Increase the `max_handler_count` compile-time setting. Current value: {}",
+                MAX_HANDLER_COUNT
+            )
+        }
+    }
+
+    /// Allocates a new string index.
+    pub fn string(&mut self) -> StringIndex {
+        let index = self.next_string_index;
+        self.next_string_index += 1;
+        StringIndex::new(index)
+    }
+
+    #[cfg(feature = "msos-descriptor")]
+    /// Add an MS OS 2.0 Descriptor Set.
+    ///
+    /// Panics if called more than once.
+    pub fn msos_descriptor(&mut self, windows_version: u32, vendor_code: u8) {
+        self.msos_descriptor.header(windows_version, vendor_code);
+    }
+
+    #[cfg(feature = "msos-descriptor")]
+    /// Add an MS OS 2.0 Device Level Feature Descriptor.
+    pub fn msos_feature<T: DeviceLevelDescriptor>(&mut self, desc: T) {
+        self.msos_descriptor.device_feature(desc);
+    }
+
+    #[cfg(feature = "msos-descriptor")]
+    /// Gets the underlying [`MsOsDescriptorWriter`] to allow adding subsets and features for classes that
+    /// do not add their own.
+    pub fn msos_writer(&mut self) -> &mut MsOsDescriptorWriter<'d> {
+        &mut self.msos_descriptor
     }
 }
 
@@ -244,6 +297,16 @@ impl<'d, D: Driver<'d>> Builder<'d, D> {
 pub struct FunctionBuilder<'a, 'd, D: Driver<'d>> {
     builder: &'a mut Builder<'d, D>,
     iface_count_index: Option<usize>,
+
+    #[cfg(feature = "msos-descriptor")]
+    first_interface: InterfaceNumber,
+}
+
+impl<'a, 'd, D: Driver<'d>> Drop for FunctionBuilder<'a, 'd, D> {
+    fn drop(&mut self) {
+        #[cfg(feature = "msos-descriptor")]
+        self.builder.msos_descriptor.end_function();
+    }
 }
 
 impl<'a, 'd, D: Driver<'d>> FunctionBuilder<'a, 'd, D> {
@@ -257,14 +320,15 @@ impl<'a, 'd, D: Driver<'d>> FunctionBuilder<'a, 'd, D> {
 
         let number = self.builder.interfaces.len() as _;
         let iface = Interface {
-            handler: None,
             current_alt_setting: 0,
             num_alt_settings: 0,
-            num_strings: 0,
         };
 
         if self.builder.interfaces.push(iface).is_err() {
-            panic!("max interface count reached")
+            panic!(
+                "embassy-usb: interface list full. Increase the `max_interface_count` compile-time setting. Current value: {}",
+                MAX_INTERFACE_COUNT
+            )
         }
 
         InterfaceBuilder {
@@ -272,6 +336,21 @@ impl<'a, 'd, D: Driver<'d>> FunctionBuilder<'a, 'd, D> {
             interface_number: InterfaceNumber::new(number),
             next_alt_setting_number: 0,
         }
+    }
+
+    #[cfg(feature = "msos-descriptor")]
+    /// Add an MS OS 2.0 Function Level Feature Descriptor.
+    pub fn msos_feature<T: FunctionLevelDescriptor>(&mut self, desc: T) {
+        if !self.builder.msos_descriptor.is_in_config_subset() {
+            self.builder.msos_descriptor.configuration(0);
+        }
+
+        if !self.builder.msos_descriptor.is_in_function_subset() {
+            self.builder.msos_descriptor.function(self.first_interface);
+        }
+
+        #[cfg(feature = "msos-descriptor")]
+        self.builder.msos_descriptor.function_feature(desc);
     }
 }
 
@@ -288,17 +367,9 @@ impl<'a, 'd, D: Driver<'d>> InterfaceBuilder<'a, 'd, D> {
         self.interface_number
     }
 
-    pub fn handler(&mut self, handler: &'d mut dyn ControlHandler) {
-        self.builder.interfaces[self.interface_number.0 as usize].handler = Some(handler);
-    }
-
     /// Allocates a new string index.
     pub fn string(&mut self) -> StringIndex {
-        let index = self.builder.next_string_index;
-        self.builder.next_string_index += 1;
-        self.builder.interfaces[self.interface_number.0 as usize].num_strings += 1;
-
-        StringIndex::new(index)
+        self.builder.string()
     }
 
     /// Add an alternate setting to the interface and write its descriptor.

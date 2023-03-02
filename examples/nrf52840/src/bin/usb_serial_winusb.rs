@@ -11,8 +11,13 @@ use embassy_nrf::usb::{Driver, HardwareVbusDetect, Instance, VbusDetect};
 use embassy_nrf::{interrupt, pac};
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use embassy_usb::driver::EndpointError;
+use embassy_usb::msos::{self, windows_version};
+use embassy_usb::types::InterfaceNumber;
 use embassy_usb::{Builder, Config};
 use {defmt_rtt as _, panic_probe as _};
+
+// This is a randomly generated GUID to allow clients on Windows to find our device
+const DEVICE_INTERFACE_GUIDS: &[&str] = &["{EAA9A5DC-30BA-44BC-9232-606CDC875321}"];
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
@@ -48,6 +53,7 @@ async fn main(_spawner: Spawner) {
     let mut device_descriptor = [0; 256];
     let mut config_descriptor = [0; 256];
     let mut bos_descriptor = [0; 256];
+    let mut msos_descriptor = [0; 256];
     let mut control_buf = [0; 64];
 
     let mut state = State::new();
@@ -58,11 +64,26 @@ async fn main(_spawner: Spawner) {
         &mut device_descriptor,
         &mut config_descriptor,
         &mut bos_descriptor,
+        &mut msos_descriptor,
         &mut control_buf,
     );
 
+    builder.msos_descriptor(windows_version::WIN8_1, 2);
+
     // Create classes on the builder.
     let mut class = CdcAcmClass::new(&mut builder, &mut state, 64);
+
+    // Since we want to create MS OS feature descriptors that apply to a function that has already been added to the
+    // builder, need to get the MsOsDescriptorWriter from the builder and manually add those descriptors.
+    // Inside a class constructor, you would just need to call `FunctionBuilder::msos_feature` instead.
+    let msos_writer = builder.msos_writer();
+    msos_writer.configuration(0);
+    msos_writer.function(InterfaceNumber(0));
+    msos_writer.function_feature(msos::CompatibleIdFeatureDescriptor::new("WINUSB", ""));
+    msos_writer.function_feature(msos::RegistryPropertyFeatureDescriptor::new(
+        "DeviceInterfaceGUIDs",
+        msos::PropertyData::RegMultiSz(DEVICE_INTERFACE_GUIDS),
+    ));
 
     // Build the builder.
     let mut usb = builder.build();
