@@ -1,6 +1,6 @@
 //! Non-Volatile Memory Controller (NVMC, AKA internal flash) driver.
 
-use core::{ptr, slice};
+use core::{ptr};
 
 use embassy_hal_common::{into_ref, PeripheralRef};
 use embedded_storage::nor_flash::{
@@ -116,12 +116,15 @@ impl<'d> ReadNorFlash for Nvmc<'d> {
     const READ_SIZE: usize = 1;
 
     fn read(&mut self, offset: u32, bytes: &mut [u8]) -> Result<(), Self::Error> {
+        // error!("read({:x}, {:x})", offset, bytes.len());
+
         if offset as usize >= FLASH_SIZE || offset as usize + bytes.len() > FLASH_SIZE {
             return Err(Error::OutOfBounds);
         }
 
-        let flash_data = unsafe { slice::from_raw_parts(offset as *const u8, bytes.len()) };
-        bytes.copy_from_slice(flash_data);
+        bytes.iter_mut().enumerate().for_each(|(i, v)| *v = unsafe {core::ptr::read_volatile((offset as usize + i) as *const u8)});
+        // let flash_data = unsafe { slice::from_raw_parts(offset as *const u8, bytes.len()) };
+        // bytes.copy_from_slice(flash_data);
         Ok(())
     }
 
@@ -135,6 +138,8 @@ impl<'d> NorFlash for Nvmc<'d> {
     const ERASE_SIZE: usize = PAGE_SIZE;
 
     fn erase(&mut self, from: u32, to: u32) -> Result<(), Self::Error> {
+        // error!("erase({:x}, {:x})", from, to);
+
         if to < from || to as usize > FLASH_SIZE {
             return Err(Error::OutOfBounds);
         }
@@ -157,15 +162,26 @@ impl<'d> NorFlash for Nvmc<'d> {
     }
 
     fn write(&mut self, offset: u32, bytes: &[u8]) -> Result<(), Self::Error> {
+        // error!("write({:x}, {:x})", offset, bytes.len());
+
         if offset as usize + bytes.len() > FLASH_SIZE {
             return Err(Error::OutOfBounds);
         }
-        if offset as usize % 4 != 0 || bytes.len() as usize % 4 != 0 {
+
+
+        if offset as usize % 4 != 0 {
+            warn!("unaligned start");
+            return Err(Error::Unaligned);
+        }
+
+        if bytes.len() as usize % 4 != 0 {
+            warn!("unaligned end");
+
             return Err(Error::Unaligned);
         }
 
         self.enable_write();
-        self.wait_ready();
+        self.wait_ready_write();
 
         unsafe {
             let p_src = bytes.as_ptr() as *const u32;

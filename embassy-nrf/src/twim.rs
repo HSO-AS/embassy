@@ -46,6 +46,7 @@ pub struct Config {
     /// most boards already have them.
     pub sda_pullup: bool,
 
+    /// disable sda sens
     pub sda_sens_disable: bool,
 
     /// Enable high drive for the SCL line.
@@ -56,6 +57,8 @@ pub struct Config {
     /// Note that using external pullups is recommended for I2C, and
     /// most boards already have them.
     pub scl_pullup: bool,
+
+    /// disable sda sens
     pub scl_sens_disable: bool,
 }
 
