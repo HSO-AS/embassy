@@ -2,15 +2,38 @@ mod descriptors;
 
 use core::sync::atomic::{fence, Ordering};
 
-use embassy_cortex_m::interrupt::InterruptExt;
+use embassy_cortex_m::interrupt::Interrupt;
 use embassy_hal_common::{into_ref, PeripheralRef};
 
 pub(crate) use self::descriptors::{RDes, RDesRing, TDes, TDesRing};
 use super::*;
 use crate::gpio::sealed::{AFType, Pin as _};
 use crate::gpio::{AnyPin, Speed};
-use crate::pac::{ETH, RCC, SYSCFG};
-use crate::Peripheral;
+use crate::pac::ETH;
+use crate::{interrupt, Peripheral};
+
+/// Interrupt handler.
+pub struct InterruptHandler {}
+
+impl interrupt::Handler<interrupt::ETH> for InterruptHandler {
+    unsafe fn on_interrupt() {
+        WAKER.wake();
+
+        // TODO: Check and clear more flags
+        unsafe {
+            let dma = ETH.ethernet_dma();
+
+            dma.dmacsr().modify(|w| {
+                w.set_ti(true);
+                w.set_ri(true);
+                w.set_nis(true);
+            });
+            // Delay two peripheral's clock
+            dma.dmacsr().read();
+            dma.dmacsr().read();
+        }
+    }
+}
 
 const MTU: usize = 1514; // 14 Ethernet header + 1500 IP packet
 
@@ -41,7 +64,7 @@ impl<'d, T: Instance, P: PHY> Ethernet<'d, T, P> {
     pub fn new<const TX: usize, const RX: usize>(
         queue: &'d mut PacketQueue<TX, RX>,
         peri: impl Peripheral<P = T> + 'd,
-        interrupt: impl Peripheral<P = crate::interrupt::ETH> + 'd,
+        _irq: impl interrupt::Binding<interrupt::ETH, InterruptHandler> + 'd,
         ref_clk: impl Peripheral<P = impl RefClkPin<T>> + 'd,
         mdio: impl Peripheral<P = impl MDIOPin<T>> + 'd,
         mdc: impl Peripheral<P = impl MDCPin<T>> + 'd,
@@ -55,21 +78,38 @@ impl<'d, T: Instance, P: PHY> Ethernet<'d, T, P> {
         mac_addr: [u8; 6],
         phy_addr: u8,
     ) -> Self {
-        into_ref!(peri, interrupt, ref_clk, mdio, mdc, crs, rx_d0, rx_d1, tx_d0, tx_d1, tx_en);
+        into_ref!(peri, ref_clk, mdio, mdc, crs, rx_d0, rx_d1, tx_d0, tx_d1, tx_en);
 
         unsafe {
             // Enable the necessary Clocks
             // NOTE(unsafe) We have exclusive access to the registers
+            #[cfg(not(rcc_h5))]
             critical_section::with(|_| {
-                RCC.apb4enr().modify(|w| w.set_syscfgen(true));
-                RCC.ahb1enr().modify(|w| {
+                crate::pac::RCC.apb4enr().modify(|w| w.set_syscfgen(true));
+                crate::pac::RCC.ahb1enr().modify(|w| {
                     w.set_eth1macen(true);
                     w.set_eth1txen(true);
                     w.set_eth1rxen(true);
                 });
 
                 // RMII
-                SYSCFG.pmcr().modify(|w| w.set_epis(0b100));
+                crate::pac::SYSCFG.pmcr().modify(|w| w.set_epis(0b100));
+            });
+
+            #[cfg(rcc_h5)]
+            critical_section::with(|_| {
+                crate::pac::RCC.apb3enr().modify(|w| w.set_sbsen(true));
+
+                crate::pac::RCC.ahb1enr().modify(|w| {
+                    w.set_ethen(true);
+                    w.set_ethtxen(true);
+                    w.set_ethrxen(true);
+                });
+
+                // RMII
+                crate::pac::SBS
+                    .pmcr()
+                    .modify(|w| w.set_eth_sel_phy(crate::pac::sbs::vals::EthSelPhy::B_0X4));
             });
 
             config_pins!(ref_clk, mdio, mdc, crs, rx_d0, rx_d1, tx_d0, tx_d1, tx_en);
@@ -198,28 +238,10 @@ impl<'d, T: Instance, P: PHY> Ethernet<'d, T, P> {
             P::phy_reset(&mut this);
             P::phy_init(&mut this);
 
-            interrupt.set_handler(Self::on_interrupt);
-            interrupt.enable();
+            interrupt::ETH::unpend();
+            interrupt::ETH::enable();
 
             this
-        }
-    }
-
-    fn on_interrupt(_cx: *mut ()) {
-        WAKER.wake();
-
-        // TODO: Check and clear more flags
-        unsafe {
-            let dma = ETH.ethernet_dma();
-
-            dma.dmacsr().modify(|w| {
-                w.set_ti(true);
-                w.set_ri(true);
-                w.set_nis(true);
-            });
-            // Delay two peripheral's clock
-            dma.dmacsr().read();
-            dma.dmacsr().read();
         }
     }
 }

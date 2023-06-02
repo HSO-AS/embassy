@@ -4,13 +4,14 @@ use core::sync::atomic::{compiler_fence, Ordering};
 use core::{mem, ptr};
 
 use atomic_polyfill::{AtomicU32, AtomicU8};
+use critical_section::CriticalSection;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_time::driver::{AlarmHandle, Driver};
 use embassy_time::TICK_HZ;
 use stm32_metapac::timer::regs;
 
-use crate::interrupt::{CriticalSection, InterruptExt};
+use crate::interrupt::Interrupt;
 use crate::pac::timer::vals;
 use crate::rcc::sealed::RccPeripheral;
 use crate::timer::sealed::{Basic16bitInstance as BasicInstance, GeneralPurpose16bitInstance as Instance};
@@ -176,9 +177,8 @@ impl RtcDriver {
                 w.set_ccie(0, true);
             });
 
-            let irq: <T as BasicInstance>::Interrupt = core::mem::transmute(());
-            irq.unpend();
-            irq.enable();
+            <T as BasicInstance>::Interrupt::unpend();
+            <T as BasicInstance>::Interrupt::enable();
 
             r.cr1().modify(|w| w.set_cen(true));
         })
@@ -250,7 +250,7 @@ impl RtcDriver {
         // Call after clearing alarm, so the callback can set another alarm.
 
         // safety:
-        // - we can ignore the possiblity of `f` being unset (null) because of the safety contract of `allocate_alarm`.
+        // - we can ignore the possibility of `f` being unset (null) because of the safety contract of `allocate_alarm`.
         // - other than that we only store valid function pointers into alarm.callback
         let f: fn(*mut ()) = unsafe { mem::transmute(alarm.callback.get()) };
         f(alarm.ctx.get());

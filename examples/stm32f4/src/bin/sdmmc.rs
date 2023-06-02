@@ -6,26 +6,28 @@ use defmt::*;
 use embassy_executor::Spawner;
 use embassy_stm32::sdmmc::{DataBlock, Sdmmc};
 use embassy_stm32::time::mhz;
-use embassy_stm32::{interrupt, Config};
+use embassy_stm32::{bind_interrupts, peripherals, sdmmc, Config};
 use {defmt_rtt as _, panic_probe as _};
 
 /// This is a safeguard to not overwrite any data on the SD card.
 /// If you don't care about SD card contents, set this to `true` to test writes.
 const ALLOW_WRITES: bool = false;
 
+bind_interrupts!(struct Irqs {
+    SDIO => sdmmc::InterruptHandler<peripherals::SDIO>;
+});
+
 #[embassy_executor::main]
-async fn main(_spawner: Spawner) -> ! {
+async fn main(_spawner: Spawner) {
     let mut config = Config::default();
     config.rcc.sys_ck = Some(mhz(48));
     config.rcc.pll48 = true;
     let p = embassy_stm32::init(config);
     info!("Hello World!");
 
-    let irq = interrupt::take!(SDIO);
-
     let mut sdmmc = Sdmmc::new_4bit(
         p.SDIO,
-        irq,
+        Irqs,
         p.DMA2_CH3,
         p.PC12,
         p.PD2,
@@ -39,7 +41,18 @@ async fn main(_spawner: Spawner) -> ! {
     // Should print 400kHz for initialization
     info!("Configured clock: {}", sdmmc.clock().0);
 
-    unwrap!(sdmmc.init_card(mhz(48)).await);
+    let mut err = None;
+    loop {
+        match sdmmc.init_card(mhz(24)).await {
+            Ok(_) => break,
+            Err(e) => {
+                if err != Some(e) {
+                    info!("waiting for card error, retrying: {:?}", e);
+                    err = Some(e);
+                }
+            }
+        }
+    }
 
     let card = unwrap!(sdmmc.card());
 
@@ -75,6 +88,4 @@ async fn main(_spawner: Spawner) -> ! {
 
     sdmmc.read_block(block_idx, &mut block).await.unwrap();
     info!("Read: {=[u8]:X}...{=[u8]:X}", block[..8], block[512 - 8..]);
-
-    loop {}
 }

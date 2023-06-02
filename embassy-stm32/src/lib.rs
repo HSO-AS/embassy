@@ -1,16 +1,11 @@
-#![no_std]
-#![cfg_attr(
-    feature = "nightly",
-    feature(type_alias_impl_trait, async_fn_in_trait, impl_trait_projections)
-)]
-#![cfg_attr(feature = "nightly", allow(incomplete_features))]
+#![cfg_attr(not(test), no_std)]
+#![cfg_attr(feature = "nightly", feature(async_fn_in_trait, impl_trait_projections))]
 
 // This must go FIRST so that all the other modules see its macros.
 pub mod fmt;
 include!(concat!(env!("OUT_DIR"), "/_macros.rs"));
 
 // Utilities
-pub mod interrupt;
 pub mod time;
 mod traits;
 
@@ -43,29 +38,30 @@ pub mod i2c;
 
 #[cfg(crc)]
 pub mod crc;
-#[cfg(any(
-    flash_l0, flash_l1, flash_wl, flash_wb, flash_l4, flash_f3, flash_f4, flash_f7, flash_h7
-))]
 pub mod flash;
+#[cfg(all(spi_v1, rcc_f4))]
+pub mod i2s;
 pub mod pwm;
+#[cfg(quadspi)]
+pub mod qspi;
 #[cfg(rng)]
 pub mod rng;
+#[cfg(all(rtc, not(rtc_v1)))]
+pub mod rtc;
 #[cfg(sdmmc)]
 pub mod sdmmc;
 #[cfg(spi)]
 pub mod spi;
+#[cfg(stm32wb)]
+pub mod tl_mbox;
 #[cfg(usart)]
 pub mod usart;
-#[cfg(all(usb, feature = "time"))]
+#[cfg(usb)]
 pub mod usb;
 #[cfg(otg)]
 pub mod usb_otg;
-
 #[cfg(iwdg)]
 pub mod wdg;
-
-#[cfg(feature = "subghz")]
-pub mod subghz;
 
 // This must go last, so that it sees all the impl_foo! macros defined earlier.
 pub(crate) mod _generated {
@@ -76,10 +72,44 @@ pub(crate) mod _generated {
     include!(concat!(env!("OUT_DIR"), "/_generated.rs"));
 }
 
+pub mod interrupt {
+    //! Interrupt definitions and macros to bind them.
+    pub use cortex_m::interrupt::{CriticalSection, Mutex};
+    pub use embassy_cortex_m::interrupt::{Binding, Handler, Interrupt, Priority};
+
+    pub use crate::_generated::interrupt::*;
+
+    /// Macro to bind interrupts to handlers.
+    ///
+    /// This defines the right interrupt handlers, and creates a unit struct (like `struct Irqs;`)
+    /// and implements the right [`Binding`]s for it. You can pass this struct to drivers to
+    /// prove at compile-time that the right interrupts have been bound.
+    // developer note: this macro can't be in `embassy-cortex-m` due to the use of `$crate`.
+    #[macro_export]
+    macro_rules! bind_interrupts {
+        ($vis:vis struct $name:ident { $($irq:ident => $($handler:ty),*;)* }) => {
+            $vis struct $name;
+
+            $(
+                #[allow(non_snake_case)]
+                #[no_mangle]
+                unsafe extern "C" fn $irq() {
+                    $(
+                        <$handler as $crate::interrupt::Handler<$crate::interrupt::$irq>>::on_interrupt();
+                    )*
+                }
+
+                $(
+                    unsafe impl $crate::interrupt::Binding<$crate::interrupt::$irq, $handler> for $name {}
+                )*
+            )*
+        };
+    }
+}
+
 // Reexports
 pub use _generated::{peripherals, Peripherals};
 pub use embassy_cortex_m::executor;
-#[cfg(any(dma, bdma))]
 use embassy_cortex_m::interrupt::Priority;
 pub use embassy_cortex_m::interrupt::_export::interrupt;
 pub use embassy_hal_common::{into_ref, Peripheral, PeripheralRef};
@@ -97,6 +127,8 @@ pub struct Config {
     pub bdma_interrupt_priority: Priority,
     #[cfg(dma)]
     pub dma_interrupt_priority: Priority,
+    #[cfg(gpdma)]
+    pub gpdma_interrupt_priority: Priority,
 }
 
 impl Default for Config {
@@ -109,6 +141,8 @@ impl Default for Config {
             bdma_interrupt_priority: Priority::P0,
             #[cfg(dma)]
             dma_interrupt_priority: Priority::P0,
+            #[cfg(gpdma)]
+            gpdma_interrupt_priority: Priority::P0,
         }
     }
 }
@@ -152,6 +186,8 @@ pub fn init(config: Config) -> Peripherals {
             config.bdma_interrupt_priority,
             #[cfg(dma)]
             config.dma_interrupt_priority,
+            #[cfg(gpdma)]
+            config.gpdma_interrupt_priority,
         );
         #[cfg(feature = "exti")]
         exti::init();

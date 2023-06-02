@@ -18,7 +18,7 @@ use embassy_usb_driver::{Direction, EndpointAddress, EndpointError, EndpointInfo
 use pac::usbd::RegisterBlock;
 
 use self::vbus_detect::VbusDetect;
-use crate::interrupt::{self, Interrupt, InterruptExt};
+use crate::interrupt::{self, Interrupt};
 use crate::util::slice_in_ram;
 use crate::{pac, Peripheral};
 
@@ -103,8 +103,8 @@ impl<'d, T: Instance, V: VbusDetect> Driver<'d, T, V> {
     ) -> Self {
         into_ref!(usb);
 
-        unsafe { T::Interrupt::steal() }.unpend();
-        unsafe { T::Interrupt::steal() }.enable();
+        T::Interrupt::unpend();
+        unsafe { T::Interrupt::enable() };
 
         Self {
             _p: usb,
@@ -153,7 +153,7 @@ impl<'d, T: Instance, V: VbusDetect + 'd> driver::Driver<'d> for Driver<'d, T, V
         }))
     }
 
-    fn start(mut self, control_max_packet_size: u16) -> (Self::Bus, Self::ControlPipe) {
+    fn start(self, control_max_packet_size: u16) -> (Self::Bus, Self::ControlPipe) {
         (
             Bus {
                 _p: unsafe { self._p.clone_unchecked() },

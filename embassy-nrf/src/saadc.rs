@@ -6,7 +6,7 @@ use core::future::poll_fn;
 use core::sync::atomic::{compiler_fence, Ordering};
 use core::task::Poll;
 
-use embassy_cortex_m::interrupt::{Interrupt, InterruptExt};
+use embassy_cortex_m::interrupt::Interrupt;
 use embassy_hal_common::drop::OnDrop;
 use embassy_hal_common::{impl_peripheral, into_ref, PeripheralRef};
 use embassy_sync::waitqueue::AtomicWaker;
@@ -189,8 +189,8 @@ impl<'d, const N: usize> Saadc<'d, N> {
         // Disable all events interrupts
         r.intenclr.write(|w| unsafe { w.bits(0x003F_FFFF) });
 
-        unsafe { interrupt::SAADC::steal() }.unpend();
-        unsafe { interrupt::SAADC::steal() }.enable();
+        interrupt::SAADC::unpend();
+        unsafe { interrupt::SAADC::enable() };
 
         Self { _p: saadc }
     }
@@ -315,7 +315,7 @@ impl<'d, const N: usize> Saadc<'d, N> {
             Ppi::new_one_to_one(ppi_ch1, Event::from_reg(&r.events_end), Task::from_reg(&r.tasks_start));
         start_ppi.enable();
 
-        let mut timer = Timer::new(timer);
+        let timer = Timer::new(timer);
         timer.set_frequency(frequency);
         timer.cc(0).write(sample_counter);
         timer.cc(0).short_compare_clear();

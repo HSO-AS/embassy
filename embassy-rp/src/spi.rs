@@ -1,3 +1,4 @@
+//! Serial Peripheral Interface
 use core::marker::PhantomData;
 
 use embassy_embedded_hal::SetConfig;
@@ -18,6 +19,7 @@ pub enum Error {
 }
 
 #[non_exhaustive]
+#[derive(Clone)]
 pub struct Config {
     pub frequency: u32,
     pub phase: Phase,
@@ -88,9 +90,15 @@ impl<'d, T: Instance, M: Mode> Spi<'d, T, M> {
                 w.set_sph(config.phase == Phase::CaptureOnSecondTransition);
                 w.set_scr(postdiv);
             });
-            p.cr1().write(|w| {
-                w.set_sse(true); // enable
+
+            // Always enable DREQ signals -- harmless if DMA is not listening
+            p.dmacr().write(|reg| {
+                reg.set_rxdmae(true);
+                reg.set_txdmae(true);
             });
+
+            // finally, enable.
+            p.cr1().write(|w| w.set_sse(true));
 
             if let Some(pin) = &clk {
                 pin.io().ctrl().write(|w| w.set_funcsel(1));
@@ -327,9 +335,6 @@ impl<'d, T: Instance> Spi<'d, T, Async> {
     pub async fn write(&mut self, buffer: &[u8]) -> Result<(), Error> {
         let tx_ch = self.tx_dma.as_mut().unwrap();
         let tx_transfer = unsafe {
-            self.inner.regs().dmacr().modify(|reg| {
-                reg.set_txdmae(true);
-            });
             // If we don't assign future to a variable, the data register pointer
             // is held across an await and makes the future non-Send.
             crate::dma::write(tx_ch, buffer, self.inner.regs().dr().ptr() as *mut _, T::TX_DREQ)
@@ -352,23 +357,20 @@ impl<'d, T: Instance> Spi<'d, T, Async> {
     }
 
     pub async fn read(&mut self, buffer: &mut [u8]) -> Result<(), Error> {
-        unsafe {
-            self.inner.regs().dmacr().write(|reg| {
-                reg.set_rxdmae(true);
-                reg.set_txdmae(true);
-            })
-        };
-        let tx_ch = self.tx_dma.as_mut().unwrap();
-        let tx_transfer = unsafe {
-            // If we don't assign future to a variable, the data register pointer
-            // is held across an await and makes the future non-Send.
-            crate::dma::write_repeated(tx_ch, self.inner.regs().dr().ptr() as *mut u8, buffer.len(), T::TX_DREQ)
-        };
+        // Start RX first. Transfer starts when TX starts, if RX
+        // is not started yet we might lose bytes.
         let rx_ch = self.rx_dma.as_mut().unwrap();
         let rx_transfer = unsafe {
             // If we don't assign future to a variable, the data register pointer
             // is held across an await and makes the future non-Send.
             crate::dma::read(rx_ch, self.inner.regs().dr().ptr() as *const _, buffer, T::RX_DREQ)
+        };
+
+        let tx_ch = self.tx_dma.as_mut().unwrap();
+        let tx_transfer = unsafe {
+            // If we don't assign future to a variable, the data register pointer
+            // is held across an await and makes the future non-Send.
+            crate::dma::write_repeated(tx_ch, self.inner.regs().dr().ptr() as *mut u8, buffer.len(), T::TX_DREQ)
         };
         join(tx_transfer, rx_transfer).await;
         Ok(())
@@ -383,28 +385,51 @@ impl<'d, T: Instance> Spi<'d, T, Async> {
     }
 
     async fn transfer_inner(&mut self, rx_ptr: *mut [u8], tx_ptr: *const [u8]) -> Result<(), Error> {
-        let (_, from_len) = crate::dma::slice_ptr_parts(tx_ptr);
-        let (_, to_len) = crate::dma::slice_ptr_parts_mut(rx_ptr);
-        assert_eq!(from_len, to_len);
-        unsafe {
-            self.inner.regs().dmacr().write(|reg| {
-                reg.set_rxdmae(true);
-                reg.set_txdmae(true);
-            })
-        };
-        let tx_ch = self.tx_dma.as_mut().unwrap();
-        let tx_transfer = unsafe {
-            // If we don't assign future to a variable, the data register pointer
-            // is held across an await and makes the future non-Send.
-            crate::dma::write(tx_ch, tx_ptr, self.inner.regs().dr().ptr() as *mut _, T::TX_DREQ)
-        };
+        let (_, tx_len) = crate::dma::slice_ptr_parts(tx_ptr);
+        let (_, rx_len) = crate::dma::slice_ptr_parts_mut(rx_ptr);
+
+        // Start RX first. Transfer starts when TX starts, if RX
+        // is not started yet we might lose bytes.
         let rx_ch = self.rx_dma.as_mut().unwrap();
         let rx_transfer = unsafe {
             // If we don't assign future to a variable, the data register pointer
             // is held across an await and makes the future non-Send.
             crate::dma::read(rx_ch, self.inner.regs().dr().ptr() as *const _, rx_ptr, T::RX_DREQ)
         };
+
+        let mut tx_ch = self.tx_dma.as_mut().unwrap();
+        // If we don't assign future to a variable, the data register pointer
+        // is held across an await and makes the future non-Send.
+        let tx_transfer = async {
+            let p = self.inner.regs();
+            unsafe {
+                crate::dma::write(&mut tx_ch, tx_ptr, p.dr().ptr() as *mut _, T::TX_DREQ).await;
+
+                if rx_len > tx_len {
+                    let write_bytes_len = rx_len - tx_len;
+                    // write dummy data
+                    // this will disable incrementation of the buffers
+                    crate::dma::write_repeated(tx_ch, p.dr().ptr() as *mut u8, write_bytes_len, T::TX_DREQ).await
+                }
+            }
+        };
         join(tx_transfer, rx_transfer).await;
+
+        // if tx > rx we should clear any overflow of the FIFO SPI buffer
+        if tx_len > rx_len {
+            let p = self.inner.regs();
+            unsafe {
+                while p.sr().read().bsy() {}
+
+                // clear RX FIFO contents to prevent stale reads
+                while p.sr().read().rne() {
+                    let _: u16 = p.dr().read().data();
+                }
+                // clear RX overrun interrupt
+                p.icr().write(|w| w.set_roric(true));
+            }
+        }
+
         Ok(())
     }
 }
