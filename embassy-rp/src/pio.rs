@@ -5,7 +5,6 @@ use core::sync::atomic::{compiler_fence, Ordering};
 use core::task::{Context, Poll};
 
 use atomic_polyfill::{AtomicU32, AtomicU8};
-use embassy_cortex_m::interrupt::Interrupt;
 use embassy_hal_common::{into_ref, Peripheral, PeripheralRef};
 use embassy_sync::waitqueue::AtomicWaker;
 use fixed::types::extra::U8;
@@ -17,11 +16,12 @@ use pio::{SideSet, Wrap};
 use crate::dma::{Channel, Transfer, Word};
 use crate::gpio::sealed::Pin as SealedPin;
 use crate::gpio::{self, AnyPin, Drive, Level, Pull, SlewRate};
+use crate::interrupt::typelevel::{Binding, Handler, Interrupt};
 use crate::pac::dma::vals::TreqSel;
 use crate::relocate::RelocatedProgram;
-use crate::{interrupt, pac, peripherals, pio_instr_util, RegExt};
+use crate::{pac, peripherals, pio_instr_util, RegExt};
 
-struct Wakers([AtomicWaker; 12]);
+pub struct Wakers([AtomicWaker; 12]);
 
 impl Wakers {
     #[inline(always)]
@@ -37,10 +37,6 @@ impl Wakers {
         &self.0[8..12]
     }
 }
-
-const NEW_AW: AtomicWaker = AtomicWaker::new();
-const PIO_WAKERS_INIT: Wakers = Wakers([NEW_AW; 12]);
-static WAKERS: [Wakers; 2] = [PIO_WAKERS_INIT; 2];
 
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -85,40 +81,20 @@ const RXNEMPTY_MASK: u32 = 1 << 0;
 const TXNFULL_MASK: u32 = 1 << 4;
 const SMIRQ_MASK: u32 = 1 << 8;
 
-#[interrupt]
-unsafe fn PIO0_IRQ_0() {
-    use crate::pac;
-    let ints = pac::PIO0.irqs(0).ints().read().0;
-    for bit in 0..12 {
-        if ints & (1 << bit) != 0 {
-            WAKERS[0].0[bit].wake();
-        }
-    }
-    pac::PIO0.irqs(0).inte().write_clear(|m| m.0 = ints);
+pub struct InterruptHandler<PIO: Instance> {
+    _pio: PhantomData<PIO>,
 }
 
-#[interrupt]
-unsafe fn PIO1_IRQ_0() {
-    use crate::pac;
-    let ints = pac::PIO1.irqs(0).ints().read().0;
-    for bit in 0..12 {
-        if ints & (1 << bit) != 0 {
-            WAKERS[1].0[bit].wake();
+impl<PIO: Instance> Handler<PIO::Interrupt> for InterruptHandler<PIO> {
+    unsafe fn on_interrupt() {
+        let ints = PIO::PIO.irqs(0).ints().read().0;
+        for bit in 0..12 {
+            if ints & (1 << bit) != 0 {
+                PIO::wakers().0[bit].wake();
+            }
         }
+        PIO::PIO.irqs(0).inte().write_clear(|m| m.0 = ints);
     }
-    pac::PIO1.irqs(0).inte().write_clear(|m| m.0 = ints);
-}
-
-pub(crate) unsafe fn init() {
-    interrupt::PIO0_IRQ_0::disable();
-    interrupt::PIO0_IRQ_0::set_priority(interrupt::Priority::P3);
-    pac::PIO0.irqs(0).inte().write(|m| m.0 = 0);
-    interrupt::PIO0_IRQ_0::enable();
-
-    interrupt::PIO1_IRQ_0::disable();
-    interrupt::PIO1_IRQ_0::set_priority(interrupt::Priority::P3);
-    pac::PIO1.irqs(0).inte().write(|m| m.0 = 0);
-    interrupt::PIO1_IRQ_0::enable();
 }
 
 /// Future that waits for TX-FIFO to become writable
@@ -142,12 +118,10 @@ impl<'a, 'd, PIO: Instance, const SM: usize> Future for FifoOutFuture<'a, 'd, PI
         if self.get_mut().sm_tx.try_push(value) {
             Poll::Ready(())
         } else {
-            WAKERS[PIO::PIO_NO as usize].fifo_out()[SM].register(cx.waker());
-            unsafe {
-                PIO::PIO.irqs(0).inte().write_set(|m| {
-                    m.0 = TXNFULL_MASK << SM;
-                });
-            }
+            PIO::wakers().fifo_out()[SM].register(cx.waker());
+            PIO::PIO.irqs(0).inte().write_set(|m| {
+                m.0 = TXNFULL_MASK << SM;
+            });
             // debug!("Pending");
             Poll::Pending
         }
@@ -156,11 +130,9 @@ impl<'a, 'd, PIO: Instance, const SM: usize> Future for FifoOutFuture<'a, 'd, PI
 
 impl<'a, 'd, PIO: Instance, const SM: usize> Drop for FifoOutFuture<'a, 'd, PIO, SM> {
     fn drop(&mut self) {
-        unsafe {
-            PIO::PIO.irqs(0).inte().write_clear(|m| {
-                m.0 = TXNFULL_MASK << SM;
-            });
-        }
+        PIO::PIO.irqs(0).inte().write_clear(|m| {
+            m.0 = TXNFULL_MASK << SM;
+        });
     }
 }
 
@@ -183,12 +155,10 @@ impl<'a, 'd, PIO: Instance, const SM: usize> Future for FifoInFuture<'a, 'd, PIO
         if let Some(v) = self.sm_rx.try_pull() {
             Poll::Ready(v)
         } else {
-            WAKERS[PIO::PIO_NO as usize].fifo_in()[SM].register(cx.waker());
-            unsafe {
-                PIO::PIO.irqs(0).inte().write_set(|m| {
-                    m.0 = RXNEMPTY_MASK << SM;
-                });
-            }
+            PIO::wakers().fifo_in()[SM].register(cx.waker());
+            PIO::PIO.irqs(0).inte().write_set(|m| {
+                m.0 = RXNEMPTY_MASK << SM;
+            });
             //debug!("Pending");
             Poll::Pending
         }
@@ -197,11 +167,9 @@ impl<'a, 'd, PIO: Instance, const SM: usize> Future for FifoInFuture<'a, 'd, PIO
 
 impl<'a, 'd, PIO: Instance, const SM: usize> Drop for FifoInFuture<'a, 'd, PIO, SM> {
     fn drop(&mut self) {
-        unsafe {
-            PIO::PIO.irqs(0).inte().write_clear(|m| {
-                m.0 = RXNEMPTY_MASK << SM;
-            });
-        }
+        PIO::PIO.irqs(0).inte().write_clear(|m| {
+            m.0 = RXNEMPTY_MASK << SM;
+        });
     }
 }
 
@@ -218,30 +186,24 @@ impl<'a, 'd, PIO: Instance> Future for IrqFuture<'a, 'd, PIO> {
         //debug!("Poll {},{}", PIO::PIO_NO, SM);
 
         // Check if IRQ flag is already set
-        if unsafe { PIO::PIO.irq().read().0 & (1 << self.irq_no) != 0 } {
-            unsafe {
-                PIO::PIO.irq().write(|m| m.0 = 1 << self.irq_no);
-            }
+        if PIO::PIO.irq().read().0 & (1 << self.irq_no) != 0 {
+            PIO::PIO.irq().write(|m| m.0 = 1 << self.irq_no);
             return Poll::Ready(());
         }
 
-        WAKERS[PIO::PIO_NO as usize].irq()[self.irq_no as usize].register(cx.waker());
-        unsafe {
-            PIO::PIO.irqs(0).inte().write_set(|m| {
-                m.0 = SMIRQ_MASK << self.irq_no;
-            });
-        }
+        PIO::wakers().irq()[self.irq_no as usize].register(cx.waker());
+        PIO::PIO.irqs(0).inte().write_set(|m| {
+            m.0 = SMIRQ_MASK << self.irq_no;
+        });
         Poll::Pending
     }
 }
 
 impl<'a, 'd, PIO: Instance> Drop for IrqFuture<'a, 'd, PIO> {
     fn drop(&mut self) {
-        unsafe {
-            PIO::PIO.irqs(0).inte().write_clear(|m| {
-                m.0 = SMIRQ_MASK << self.irq_no;
-            });
-        }
+        PIO::PIO.irqs(0).inte().write_clear(|m| {
+            m.0 = SMIRQ_MASK << self.irq_no;
+        });
     }
 }
 
@@ -254,57 +216,47 @@ impl<'l, PIO: Instance> Pin<'l, PIO> {
     /// Set the pin's drive strength.
     #[inline]
     pub fn set_drive_strength(&mut self, strength: Drive) {
-        unsafe {
-            self.pin.pad_ctrl().modify(|w| {
-                w.set_drive(match strength {
-                    Drive::_2mA => pac::pads::vals::Drive::_2MA,
-                    Drive::_4mA => pac::pads::vals::Drive::_4MA,
-                    Drive::_8mA => pac::pads::vals::Drive::_8MA,
-                    Drive::_12mA => pac::pads::vals::Drive::_12MA,
-                });
+        self.pin.pad_ctrl().modify(|w| {
+            w.set_drive(match strength {
+                Drive::_2mA => pac::pads::vals::Drive::_2MA,
+                Drive::_4mA => pac::pads::vals::Drive::_4MA,
+                Drive::_8mA => pac::pads::vals::Drive::_8MA,
+                Drive::_12mA => pac::pads::vals::Drive::_12MA,
             });
-        }
+        });
     }
 
     // Set the pin's slew rate.
     #[inline]
     pub fn set_slew_rate(&mut self, slew_rate: SlewRate) {
-        unsafe {
-            self.pin.pad_ctrl().modify(|w| {
-                w.set_slewfast(slew_rate == SlewRate::Fast);
-            });
-        }
+        self.pin.pad_ctrl().modify(|w| {
+            w.set_slewfast(slew_rate == SlewRate::Fast);
+        });
     }
 
     /// Set the pin's pull.
     #[inline]
     pub fn set_pull(&mut self, pull: Pull) {
-        unsafe {
-            self.pin.pad_ctrl().modify(|w| {
-                w.set_pue(pull == Pull::Up);
-                w.set_pde(pull == Pull::Down);
-            });
-        }
+        self.pin.pad_ctrl().modify(|w| {
+            w.set_pue(pull == Pull::Up);
+            w.set_pde(pull == Pull::Down);
+        });
     }
 
     /// Set the pin's schmitt trigger.
     #[inline]
     pub fn set_schmitt(&mut self, enable: bool) {
-        unsafe {
-            self.pin.pad_ctrl().modify(|w| {
-                w.set_schmitt(enable);
-            });
-        }
+        self.pin.pad_ctrl().modify(|w| {
+            w.set_schmitt(enable);
+        });
     }
 
     pub fn set_input_sync_bypass<'a>(&mut self, bypass: bool) {
         let mask = 1 << self.pin();
-        unsafe {
-            if bypass {
-                PIO::PIO.input_sync_bypass().write_set(|w| *w = mask);
-            } else {
-                PIO::PIO.input_sync_bypass().write_clear(|w| *w = mask);
-            }
+        if bypass {
+            PIO::PIO.input_sync_bypass().write_set(|w| *w = mask);
+        } else {
+            PIO::PIO.input_sync_bypass().write_clear(|w| *w = mask);
         }
     }
 
@@ -319,41 +271,37 @@ pub struct StateMachineRx<'d, PIO: Instance, const SM: usize> {
 
 impl<'d, PIO: Instance, const SM: usize> StateMachineRx<'d, PIO, SM> {
     pub fn empty(&self) -> bool {
-        unsafe { PIO::PIO.fstat().read().rxempty() & (1u8 << SM) != 0 }
+        PIO::PIO.fstat().read().rxempty() & (1u8 << SM) != 0
     }
 
     pub fn full(&self) -> bool {
-        unsafe { PIO::PIO.fstat().read().rxfull() & (1u8 << SM) != 0 }
+        PIO::PIO.fstat().read().rxfull() & (1u8 << SM) != 0
     }
 
     pub fn level(&self) -> u8 {
-        unsafe { (PIO::PIO.flevel().read().0 >> (SM * 8 + 4)) as u8 & 0x0f }
+        (PIO::PIO.flevel().read().0 >> (SM * 8 + 4)) as u8 & 0x0f
     }
 
     pub fn stalled(&self) -> bool {
-        unsafe {
-            let fdebug = PIO::PIO.fdebug();
-            let ret = fdebug.read().rxstall() & (1 << SM) != 0;
-            if ret {
-                fdebug.write(|w| w.set_rxstall(1 << SM));
-            }
-            ret
+        let fdebug = PIO::PIO.fdebug();
+        let ret = fdebug.read().rxstall() & (1 << SM) != 0;
+        if ret {
+            fdebug.write(|w| w.set_rxstall(1 << SM));
         }
+        ret
     }
 
     pub fn underflowed(&self) -> bool {
-        unsafe {
-            let fdebug = PIO::PIO.fdebug();
-            let ret = fdebug.read().rxunder() & (1 << SM) != 0;
-            if ret {
-                fdebug.write(|w| w.set_rxunder(1 << SM));
-            }
-            ret
+        let fdebug = PIO::PIO.fdebug();
+        let ret = fdebug.read().rxunder() & (1 << SM) != 0;
+        if ret {
+            fdebug.write(|w| w.set_rxunder(1 << SM));
         }
+        ret
     }
 
     pub fn pull(&mut self) -> u32 {
-        unsafe { PIO::PIO.rxf(SM).read() }
+        PIO::PIO.rxf(SM).read()
     }
 
     pub fn try_pull(&mut self) -> Option<u32> {
@@ -372,24 +320,22 @@ impl<'d, PIO: Instance, const SM: usize> StateMachineRx<'d, PIO, SM> {
         ch: PeripheralRef<'a, C>,
         data: &'a mut [W],
     ) -> Transfer<'a, C> {
-        unsafe {
-            let pio_no = PIO::PIO_NO;
-            let p = ch.regs();
-            p.write_addr().write_value(data.as_ptr() as u32);
-            p.read_addr().write_value(PIO::PIO.rxf(SM).ptr() as u32);
-            p.trans_count().write_value(data.len() as u32);
-            compiler_fence(Ordering::SeqCst);
-            p.ctrl_trig().write(|w| {
-                // Set RX DREQ for this statemachine
-                w.set_treq_sel(TreqSel(pio_no * 8 + SM as u8 + 4));
-                w.set_data_size(W::size());
-                w.set_chain_to(ch.number());
-                w.set_incr_read(false);
-                w.set_incr_write(true);
-                w.set_en(true);
-            });
-            compiler_fence(Ordering::SeqCst);
-        }
+        let pio_no = PIO::PIO_NO;
+        let p = ch.regs();
+        p.write_addr().write_value(data.as_ptr() as u32);
+        p.read_addr().write_value(PIO::PIO.rxf(SM).as_ptr() as u32);
+        p.trans_count().write_value(data.len() as u32);
+        compiler_fence(Ordering::SeqCst);
+        p.ctrl_trig().write(|w| {
+            // Set RX DREQ for this statemachine
+            w.set_treq_sel(TreqSel(pio_no * 8 + SM as u8 + 4));
+            w.set_data_size(W::size());
+            w.set_chain_to(ch.number());
+            w.set_incr_read(false);
+            w.set_incr_write(true);
+            w.set_en(true);
+        });
+        compiler_fence(Ordering::SeqCst);
         Transfer::new(ch)
     }
 }
@@ -400,42 +346,36 @@ pub struct StateMachineTx<'d, PIO: Instance, const SM: usize> {
 
 impl<'d, PIO: Instance, const SM: usize> StateMachineTx<'d, PIO, SM> {
     pub fn empty(&self) -> bool {
-        unsafe { PIO::PIO.fstat().read().txempty() & (1u8 << SM) != 0 }
+        PIO::PIO.fstat().read().txempty() & (1u8 << SM) != 0
     }
     pub fn full(&self) -> bool {
-        unsafe { PIO::PIO.fstat().read().txfull() & (1u8 << SM) != 0 }
+        PIO::PIO.fstat().read().txfull() & (1u8 << SM) != 0
     }
 
     pub fn level(&self) -> u8 {
-        unsafe { (PIO::PIO.flevel().read().0 >> (SM * 8)) as u8 & 0x0f }
+        (PIO::PIO.flevel().read().0 >> (SM * 8)) as u8 & 0x0f
     }
 
     pub fn stalled(&self) -> bool {
-        unsafe {
-            let fdebug = PIO::PIO.fdebug();
-            let ret = fdebug.read().txstall() & (1 << SM) != 0;
-            if ret {
-                fdebug.write(|w| w.set_txstall(1 << SM));
-            }
-            ret
+        let fdebug = PIO::PIO.fdebug();
+        let ret = fdebug.read().txstall() & (1 << SM) != 0;
+        if ret {
+            fdebug.write(|w| w.set_txstall(1 << SM));
         }
+        ret
     }
 
     pub fn overflowed(&self) -> bool {
-        unsafe {
-            let fdebug = PIO::PIO.fdebug();
-            let ret = fdebug.read().txover() & (1 << SM) != 0;
-            if ret {
-                fdebug.write(|w| w.set_txover(1 << SM));
-            }
-            ret
+        let fdebug = PIO::PIO.fdebug();
+        let ret = fdebug.read().txover() & (1 << SM) != 0;
+        if ret {
+            fdebug.write(|w| w.set_txover(1 << SM));
         }
+        ret
     }
 
     pub fn push(&mut self, v: u32) {
-        unsafe {
-            PIO::PIO.txf(SM).write_value(v);
-        }
+        PIO::PIO.txf(SM).write_value(v);
     }
 
     pub fn try_push(&mut self, v: u32) -> bool {
@@ -451,24 +391,22 @@ impl<'d, PIO: Instance, const SM: usize> StateMachineTx<'d, PIO, SM> {
     }
 
     pub fn dma_push<'a, C: Channel, W: Word>(&'a mut self, ch: PeripheralRef<'a, C>, data: &'a [W]) -> Transfer<'a, C> {
-        unsafe {
-            let pio_no = PIO::PIO_NO;
-            let p = ch.regs();
-            p.read_addr().write_value(data.as_ptr() as u32);
-            p.write_addr().write_value(PIO::PIO.txf(SM).ptr() as u32);
-            p.trans_count().write_value(data.len() as u32);
-            compiler_fence(Ordering::SeqCst);
-            p.ctrl_trig().write(|w| {
-                // Set TX DREQ for this statemachine
-                w.set_treq_sel(TreqSel(pio_no * 8 + SM as u8));
-                w.set_data_size(W::size());
-                w.set_chain_to(ch.number());
-                w.set_incr_read(true);
-                w.set_incr_write(false);
-                w.set_en(true);
-            });
-            compiler_fence(Ordering::SeqCst);
-        }
+        let pio_no = PIO::PIO_NO;
+        let p = ch.regs();
+        p.read_addr().write_value(data.as_ptr() as u32);
+        p.write_addr().write_value(PIO::PIO.txf(SM).as_ptr() as u32);
+        p.trans_count().write_value(data.len() as u32);
+        compiler_fence(Ordering::SeqCst);
+        p.ctrl_trig().write(|w| {
+            // Set TX DREQ for this statemachine
+            w.set_treq_sel(TreqSel(pio_no * 8 + SM as u8));
+            w.set_data_size(W::size());
+            w.set_chain_to(ch.number());
+            w.set_incr_read(true);
+            w.set_incr_write(false);
+            w.set_en(true);
+        });
+        compiler_fence(Ordering::SeqCst);
         Transfer::new(ch)
     }
 }
@@ -480,9 +418,7 @@ pub struct StateMachine<'d, PIO: Instance, const SM: usize> {
 
 impl<'d, PIO: Instance, const SM: usize> Drop for StateMachine<'d, PIO, SM> {
     fn drop(&mut self) {
-        unsafe {
-            PIO::PIO.ctrl().write_clear(|w| w.set_sm_enable(1 << SM));
-        }
+        PIO::PIO.ctrl().write_clear(|w| w.set_sm_enable(1 << SM));
         on_pio_drop::<PIO>();
     }
 }
@@ -645,45 +581,43 @@ impl<'d, PIO: Instance + 'd, const SM: usize> StateMachine<'d, PIO, SM> {
         assert!(config.shift_in.threshold <= 32, "shift_in.threshold must be <= 32");
         assert!(config.shift_out.threshold <= 32, "shift_out.threshold must be <= 32");
         let sm = Self::this_sm();
-        unsafe {
-            sm.clkdiv().write(|w| w.0 = config.clock_divider.to_bits() << 8);
-            sm.execctrl().write(|w| {
-                w.set_side_en(config.exec.side_en);
-                w.set_side_pindir(config.exec.side_pindir);
-                w.set_jmp_pin(config.exec.jmp_pin);
-                w.set_out_en_sel(config.out_en_sel);
-                w.set_inline_out_en(config.inline_out_en);
-                w.set_out_sticky(config.out_sticky);
-                w.set_wrap_top(config.exec.wrap_top);
-                w.set_wrap_bottom(config.exec.wrap_bottom);
-                w.set_status_sel(match config.status_sel {
-                    StatusSource::TxFifoLevel => SmExecctrlStatusSel::TXLEVEL,
-                    StatusSource::RxFifoLevel => SmExecctrlStatusSel::RXLEVEL,
-                });
-                w.set_status_n(config.status_n);
+        sm.clkdiv().write(|w| w.0 = config.clock_divider.to_bits() << 8);
+        sm.execctrl().write(|w| {
+            w.set_side_en(config.exec.side_en);
+            w.set_side_pindir(config.exec.side_pindir);
+            w.set_jmp_pin(config.exec.jmp_pin);
+            w.set_out_en_sel(config.out_en_sel);
+            w.set_inline_out_en(config.inline_out_en);
+            w.set_out_sticky(config.out_sticky);
+            w.set_wrap_top(config.exec.wrap_top);
+            w.set_wrap_bottom(config.exec.wrap_bottom);
+            w.set_status_sel(match config.status_sel {
+                StatusSource::TxFifoLevel => SmExecctrlStatusSel::TXLEVEL,
+                StatusSource::RxFifoLevel => SmExecctrlStatusSel::RXLEVEL,
             });
-            sm.shiftctrl().write(|w| {
-                w.set_fjoin_rx(config.fifo_join == FifoJoin::RxOnly);
-                w.set_fjoin_tx(config.fifo_join == FifoJoin::TxOnly);
-                w.set_pull_thresh(config.shift_out.threshold);
-                w.set_push_thresh(config.shift_in.threshold);
-                w.set_out_shiftdir(config.shift_out.direction == ShiftDirection::Right);
-                w.set_in_shiftdir(config.shift_in.direction == ShiftDirection::Right);
-                w.set_autopull(config.shift_out.auto_fill);
-                w.set_autopush(config.shift_in.auto_fill);
-            });
-            sm.pinctrl().write(|w| {
-                w.set_sideset_count(config.pins.sideset_count);
-                w.set_set_count(config.pins.set_count);
-                w.set_out_count(config.pins.out_count);
-                w.set_in_base(config.pins.in_base);
-                w.set_sideset_base(config.pins.sideset_base);
-                w.set_set_base(config.pins.set_base);
-                w.set_out_base(config.pins.out_base);
-            });
-            if let Some(origin) = config.origin {
-                pio_instr_util::exec_jmp(self, origin);
-            }
+            w.set_status_n(config.status_n);
+        });
+        sm.shiftctrl().write(|w| {
+            w.set_fjoin_rx(config.fifo_join == FifoJoin::RxOnly);
+            w.set_fjoin_tx(config.fifo_join == FifoJoin::TxOnly);
+            w.set_pull_thresh(config.shift_out.threshold);
+            w.set_push_thresh(config.shift_in.threshold);
+            w.set_out_shiftdir(config.shift_out.direction == ShiftDirection::Right);
+            w.set_in_shiftdir(config.shift_in.direction == ShiftDirection::Right);
+            w.set_autopull(config.shift_out.auto_fill);
+            w.set_autopush(config.shift_in.auto_fill);
+        });
+        sm.pinctrl().write(|w| {
+            w.set_sideset_count(config.pins.sideset_count);
+            w.set_set_count(config.pins.set_count);
+            w.set_out_count(config.pins.out_count);
+            w.set_in_base(config.pins.in_base);
+            w.set_sideset_base(config.pins.sideset_base);
+            w.set_set_base(config.pins.set_base);
+            w.set_out_base(config.pins.out_base);
+        });
+        if let Some(origin) = config.origin {
+            unsafe { pio_instr_util::exec_jmp(self, origin) }
         }
     }
 
@@ -694,45 +628,35 @@ impl<'d, PIO: Instance + 'd, const SM: usize> StateMachine<'d, PIO, SM> {
 
     pub fn restart(&mut self) {
         let mask = 1u8 << SM;
-        unsafe {
-            PIO::PIO.ctrl().write_set(|w| w.set_sm_restart(mask));
-        }
+        PIO::PIO.ctrl().write_set(|w| w.set_sm_restart(mask));
     }
     pub fn set_enable(&mut self, enable: bool) {
         let mask = 1u8 << SM;
-        unsafe {
-            if enable {
-                PIO::PIO.ctrl().write_set(|w| w.set_sm_enable(mask));
-            } else {
-                PIO::PIO.ctrl().write_clear(|w| w.set_sm_enable(mask));
-            }
+        if enable {
+            PIO::PIO.ctrl().write_set(|w| w.set_sm_enable(mask));
+        } else {
+            PIO::PIO.ctrl().write_clear(|w| w.set_sm_enable(mask));
         }
     }
 
     pub fn is_enabled(&self) -> bool {
-        unsafe { PIO::PIO.ctrl().read().sm_enable() & (1u8 << SM) != 0 }
+        PIO::PIO.ctrl().read().sm_enable() & (1u8 << SM) != 0
     }
 
     pub fn clkdiv_restart(&mut self) {
         let mask = 1u8 << SM;
-        unsafe {
-            PIO::PIO.ctrl().write_set(|w| w.set_clkdiv_restart(mask));
-        }
+        PIO::PIO.ctrl().write_set(|w| w.set_clkdiv_restart(mask));
     }
 
     fn with_paused(&mut self, f: impl FnOnce(&mut Self)) {
         let enabled = self.is_enabled();
         self.set_enable(false);
-        let pincfg = unsafe { Self::this_sm().pinctrl().read() };
-        let execcfg = unsafe { Self::this_sm().execctrl().read() };
-        unsafe {
-            Self::this_sm().execctrl().write_clear(|w| w.set_out_sticky(true));
-        }
+        let pincfg = Self::this_sm().pinctrl().read();
+        let execcfg = Self::this_sm().execctrl().read();
+        Self::this_sm().execctrl().write_clear(|w| w.set_out_sticky(true));
         f(self);
-        unsafe {
-            Self::this_sm().pinctrl().write_value(pincfg);
-            Self::this_sm().execctrl().write_value(execcfg);
-        }
+        Self::this_sm().pinctrl().write_value(pincfg);
+        Self::this_sm().execctrl().write_value(execcfg);
         self.set_enable(enabled);
     }
 
@@ -741,14 +665,12 @@ impl<'d, PIO: Instance + 'd, const SM: usize> StateMachine<'d, PIO, SM> {
     pub fn set_pin_dirs(&mut self, dir: Direction, pins: &[&Pin<'d, PIO>]) {
         self.with_paused(|sm| {
             for pin in pins {
-                unsafe {
-                    Self::this_sm().pinctrl().write(|w| {
-                        w.set_set_base(pin.pin());
-                        w.set_set_count(1);
-                    });
-                    // SET PINDIRS, (dir)
-                    sm.exec_instr(0b111_00000_100_00000 | dir as u16);
-                }
+                Self::this_sm().pinctrl().write(|w| {
+                    w.set_set_base(pin.pin());
+                    w.set_set_count(1);
+                });
+                // SET PINDIRS, (dir)
+                unsafe { sm.exec_instr(0b111_00000_100_00000 | dir as u16) };
             }
         });
     }
@@ -758,29 +680,25 @@ impl<'d, PIO: Instance + 'd, const SM: usize> StateMachine<'d, PIO, SM> {
     pub fn set_pins(&mut self, level: Level, pins: &[&Pin<'d, PIO>]) {
         self.with_paused(|sm| {
             for pin in pins {
-                unsafe {
-                    Self::this_sm().pinctrl().write(|w| {
-                        w.set_set_base(pin.pin());
-                        w.set_set_count(1);
-                    });
-                    // SET PINS, (dir)
-                    sm.exec_instr(0b111_00000_000_00000 | level as u16);
-                }
+                Self::this_sm().pinctrl().write(|w| {
+                    w.set_set_base(pin.pin());
+                    w.set_set_count(1);
+                });
+                // SET PINS, (dir)
+                unsafe { sm.exec_instr(0b111_00000_000_00000 | level as u16) };
             }
         });
     }
 
     pub fn clear_fifos(&mut self) {
         // Toggle FJOIN_RX to flush FIFOs
-        unsafe {
-            let shiftctrl = Self::this_sm().shiftctrl();
-            shiftctrl.modify(|w| {
-                w.set_fjoin_rx(!w.fjoin_rx());
-            });
-            shiftctrl.modify(|w| {
-                w.set_fjoin_rx(!w.fjoin_rx());
-            });
-        }
+        let shiftctrl = Self::this_sm().shiftctrl();
+        shiftctrl.modify(|w| {
+            w.set_fjoin_rx(!w.fjoin_rx());
+        });
+        shiftctrl.modify(|w| {
+            w.set_fjoin_rx(!w.fjoin_rx());
+        });
     }
 
     pub unsafe fn exec_instr(&mut self, instr: u16) {
@@ -854,11 +772,9 @@ impl<'d, PIO: Instance> Common<'d, PIO> {
             if (self.instructions_used | used_mask) & mask != 0 {
                 return Err(addr);
             }
-            unsafe {
-                PIO::PIO.instr_mem(addr).write(|w| {
-                    w.set_instr_mem(instr);
-                });
-            }
+            PIO::PIO.instr_mem(addr).write(|w| {
+                w.set_instr_mem(instr);
+            });
             used_mask |= mask;
         }
         self.instructions_used |= used_mask;
@@ -875,17 +791,15 @@ impl<'d, PIO: Instance> Common<'d, PIO> {
     }
 
     pub fn set_input_sync_bypass<'a>(&'a mut self, bypass: u32, mask: u32) {
-        unsafe {
-            // this can interfere with per-pin bypass functions. splitting the
-            // modification is going to be fine since nothing that relies on
-            // it can reasonably run before we finish.
-            PIO::PIO.input_sync_bypass().write_set(|w| *w = mask & bypass);
-            PIO::PIO.input_sync_bypass().write_clear(|w| *w = mask & !bypass);
-        }
+        // this can interfere with per-pin bypass functions. splitting the
+        // modification is going to be fine since nothing that relies on
+        // it can reasonably run before we finish.
+        PIO::PIO.input_sync_bypass().write_set(|w| *w = mask & bypass);
+        PIO::PIO.input_sync_bypass().write_clear(|w| *w = mask & !bypass);
     }
 
     pub fn get_input_sync_bypass(&self) -> u32 {
-        unsafe { PIO::PIO.input_sync_bypass().read() }
+        PIO::PIO.input_sync_bypass().read()
     }
 
     /// Register a pin for PIO usage. Pins will be released from the PIO block
@@ -894,9 +808,7 @@ impl<'d, PIO: Instance> Common<'d, PIO> {
     /// of [`Pio`] do not keep pin registrations alive.**
     pub fn make_pio_pin(&mut self, pin: impl Peripheral<P = impl PioPin + 'd> + 'd) -> Pin<'d, PIO> {
         into_ref!(pin);
-        unsafe {
-            pin.io().ctrl().write(|w| w.set_funcsel(PIO::FUNCSEL.0));
-        }
+        pin.io().ctrl().write(|w| w.set_funcsel(PIO::FUNCSEL as _));
         // we can be relaxed about this because we're &mut here and nothing is cached
         PIO::state().used_pins.fetch_or(1 << pin.pin_bank(), Ordering::Relaxed);
         Pin {
@@ -914,13 +826,11 @@ impl<'d, PIO: Instance> Common<'d, PIO> {
             _pio: PhantomData,
         };
         f(&mut batch);
-        unsafe {
-            PIO::PIO.ctrl().modify(|w| {
-                w.set_clkdiv_restart(batch.clkdiv_restart);
-                w.set_sm_restart(batch.sm_restart);
-                w.set_sm_enable((w.sm_enable() & !batch.sm_enable_mask) | batch.sm_enable);
-            });
-        }
+        PIO::PIO.ctrl().modify(|w| {
+            w.set_clkdiv_restart(batch.clkdiv_restart);
+            w.set_sm_restart(batch.sm_restart);
+            w.set_sm_enable((w.sm_enable() & !batch.sm_enable_mask) | batch.sm_enable);
+        });
     }
 }
 
@@ -972,11 +882,11 @@ impl<'d, PIO: Instance> IrqFlags<'d, PIO> {
     }
 
     pub fn check_any(&self, irqs: u8) -> bool {
-        unsafe { PIO::PIO.irq().read().irq() & irqs != 0 }
+        PIO::PIO.irq().read().irq() & irqs != 0
     }
 
     pub fn check_all(&self, irqs: u8) -> bool {
-        unsafe { PIO::PIO.irq().read().irq() & irqs == irqs }
+        PIO::PIO.irq().read().irq() & irqs == irqs
     }
 
     pub fn clear(&self, irq_no: usize) {
@@ -985,7 +895,7 @@ impl<'d, PIO: Instance> IrqFlags<'d, PIO> {
     }
 
     pub fn clear_all(&self, irqs: u8) {
-        unsafe { PIO::PIO.irq().write(|w| w.set_irq(irqs)) }
+        PIO::PIO.irq().write(|w| w.set_irq(irqs))
     }
 
     pub fn set(&self, irq_no: usize) {
@@ -994,7 +904,7 @@ impl<'d, PIO: Instance> IrqFlags<'d, PIO> {
     }
 
     pub fn set_all(&self, irqs: u8) {
-        unsafe { PIO::PIO.irq_force().write(|w| w.set_irq_force(irqs)) }
+        PIO::PIO.irq_force().write(|w| w.set_irq_force(irqs))
     }
 }
 
@@ -1013,9 +923,11 @@ pub struct Pio<'d, PIO: Instance> {
 }
 
 impl<'d, PIO: Instance> Pio<'d, PIO> {
-    pub fn new(_pio: impl Peripheral<P = PIO> + 'd) -> Self {
+    pub fn new(_pio: impl Peripheral<P = PIO> + 'd, _irq: impl Binding<PIO::Interrupt, InterruptHandler<PIO>>) -> Self {
         PIO::state().users.store(5, Ordering::Release);
         PIO::state().used_pins.store(0, Ordering::Release);
+        PIO::Interrupt::unpend();
+        unsafe { PIO::Interrupt::enable() };
         Self {
             common: Common {
                 instructions_used: 0,
@@ -1062,13 +974,11 @@ fn on_pio_drop<PIO: Instance>() {
     let state = PIO::state();
     if state.users.fetch_sub(1, Ordering::AcqRel) == 1 {
         let used_pins = state.used_pins.load(Ordering::Relaxed);
-        let null = Gpio0ctrlFuncsel::NULL.0;
+        let null = Gpio0ctrlFuncsel::NULL as _;
         // we only have 30 pins. don't test the other two since gpio() asserts.
         for i in 0..30 {
             if used_pins & (1 << i) != 0 {
-                unsafe {
-                    pac::IO_BANK0.gpio(i).ctrl().write(|w| w.set_funcsel(null));
-                }
+                pac::IO_BANK0.gpio(i).ctrl().write(|w| w.set_funcsel(null));
             }
         }
     }
@@ -1083,6 +993,15 @@ mod sealed {
         const PIO_NO: u8;
         const PIO: &'static crate::pac::pio::Pio;
         const FUNCSEL: crate::pac::io::vals::Gpio0ctrlFuncsel;
+        type Interrupt: crate::interrupt::typelevel::Interrupt;
+
+        #[inline]
+        fn wakers() -> &'static Wakers {
+            const NEW_AW: AtomicWaker = AtomicWaker::new();
+            static WAKERS: Wakers = Wakers([NEW_AW; 12]);
+
+            &WAKERS
+        }
 
         #[inline]
         fn state() -> &'static State {
@@ -1099,18 +1018,19 @@ mod sealed {
 pub trait Instance: sealed::Instance + Sized + Unpin {}
 
 macro_rules! impl_pio {
-    ($name:ident, $pio:expr, $pac:ident, $funcsel:ident) => {
+    ($name:ident, $pio:expr, $pac:ident, $funcsel:ident, $irq:ident) => {
         impl sealed::Instance for peripherals::$name {
             const PIO_NO: u8 = $pio;
             const PIO: &'static pac::pio::Pio = &pac::$pac;
             const FUNCSEL: pac::io::vals::Gpio0ctrlFuncsel = pac::io::vals::Gpio0ctrlFuncsel::$funcsel;
+            type Interrupt = crate::interrupt::typelevel::$irq;
         }
         impl Instance for peripherals::$name {}
     };
 }
 
-impl_pio!(PIO0, 0, PIO0, PIO0_0);
-impl_pio!(PIO1, 1, PIO1, PIO1_0);
+impl_pio!(PIO0, 0, PIO0, PIO0_0, PIO0_IRQ_0);
+impl_pio!(PIO1, 1, PIO1, PIO1_0, PIO1_IRQ_0);
 
 pub trait PioPin: sealed::PioPin + gpio::Pin {}
 

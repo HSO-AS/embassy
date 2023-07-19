@@ -9,7 +9,7 @@ use embassy_sync::waitqueue::AtomicWaker;
 
 use crate::gpio::sealed::Pin as _;
 use crate::gpio::{AnyPin, Flex, Input, Output, Pin as GpioPin};
-use crate::interrupt::Interrupt;
+use crate::interrupt::InterruptExt;
 use crate::ppi::{Event, Task};
 use crate::{interrupt, pac, peripherals};
 
@@ -75,15 +75,15 @@ pub(crate) fn init(irq_prio: crate::interrupt::Priority) {
 
     // Enable interrupts
     #[cfg(any(feature = "nrf5340-app-s", feature = "nrf9160-s"))]
-    type Irq = interrupt::GPIOTE0;
+    let irq = interrupt::GPIOTE0;
     #[cfg(any(feature = "nrf5340-app-ns", feature = "nrf9160-ns"))]
-    type Irq = interrupt::GPIOTE1;
+    let irq = interrupt::GPIOTE1;
     #[cfg(any(feature = "_nrf52", feature = "nrf5340-net"))]
-    type Irq = interrupt::GPIOTE;
+    let irq = interrupt::GPIOTE;
 
-    Irq::unpend();
-    Irq::set_priority(irq_prio);
-    unsafe { Irq::enable() };
+    irq.unpend();
+    irq.set_priority(irq_prio);
+    unsafe { irq.enable() };
 
     let g = regs();
     g.events_port.write(|w| w);
@@ -91,18 +91,21 @@ pub(crate) fn init(irq_prio: crate::interrupt::Priority) {
 }
 
 #[cfg(any(feature = "nrf5340-app-s", feature = "nrf9160-s"))]
+#[cfg(feature = "rt")]
 #[interrupt]
 fn GPIOTE0() {
     unsafe { handle_gpiote_interrupt() };
 }
 
 #[cfg(any(feature = "nrf5340-app-ns", feature = "nrf9160-ns"))]
+#[cfg(feature = "rt")]
 #[interrupt]
 fn GPIOTE1() {
     unsafe { handle_gpiote_interrupt() };
 }
 
 #[cfg(any(feature = "_nrf52", feature = "nrf5340-net"))]
+#[cfg(feature = "rt")]
 #[interrupt]
 fn GPIOTE() {
     unsafe { handle_gpiote_interrupt() };
@@ -218,7 +221,7 @@ impl<'d, C: Channel, T: GpioPin> InputChannel<'d, C, T> {
     }
 
     /// Returns the IN event, for use with PPI.
-    pub fn event_in(&self) -> Event {
+    pub fn event_in(&self) -> Event<'d> {
         let g = regs();
         Event::from_reg(&g.events_in[self.ch.number()])
     }
@@ -289,21 +292,21 @@ impl<'d, C: Channel, T: GpioPin> OutputChannel<'d, C, T> {
     }
 
     /// Returns the OUT task, for use with PPI.
-    pub fn task_out(&self) -> Task {
+    pub fn task_out(&self) -> Task<'d> {
         let g = regs();
         Task::from_reg(&g.tasks_out[self.ch.number()])
     }
 
     /// Returns the CLR task, for use with PPI.
     #[cfg(not(feature = "nrf51"))]
-    pub fn task_clr(&self) -> Task {
+    pub fn task_clr(&self) -> Task<'d> {
         let g = regs();
         Task::from_reg(&g.tasks_clr[self.ch.number()])
     }
 
     /// Returns the SET task, for use with PPI.
     #[cfg(not(feature = "nrf51"))]
-    pub fn task_set(&self) -> Task {
+    pub fn task_set(&self) -> Task<'d> {
         let g = regs();
         Task::from_reg(&g.tasks_set[self.ch.number()])
     }

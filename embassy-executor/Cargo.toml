@@ -63,8 +63,8 @@ tracing = { version = "0.1", optional = true, default-features = false, features
 
 
 futures-util = { version = "0.3.17", default-features = false }
-embassy-macros  = { version = "0.2.0", path = "../embassy-macros" }
-embassy-time  = { version = "0.1.0", path = "../embassy-time", optional = true}
+embassy-macros = { version = "0.2.0", path = "../embassy-macros" }
+embassy-time = { version = "0.1.2", path = "../embassy-time", optional = true}
 atomic-polyfill = "1.0.1"
 critical-section = "1.1"
 static_cell = "1.1"

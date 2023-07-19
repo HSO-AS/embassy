@@ -16,6 +16,7 @@ use embassy_rp::clocks::RoscRng;
 use embassy_rp::gpio::{Input, Level, Output, Pull};
 use embassy_rp::peripherals::{PIN_17, PIN_20, PIN_21, SPI0};
 use embassy_rp::spi::{Async, Config as SpiConfig, Spi};
+use embassy_time::Delay;
 use embedded_hal_async::spi::ExclusiveDevice;
 use rand::RngCore;
 use static_cell::make_static;
@@ -24,7 +25,7 @@ use {defmt_rtt as _, panic_probe as _};
 async fn ethernet_task(
     runner: Runner<
         'static,
-        ExclusiveDevice<Spi<'static, SPI0, Async>, Output<'static, PIN_17>>,
+        ExclusiveDevice<Spi<'static, SPI0, Async>, Output<'static, PIN_17>, Delay>,
         Input<'static, PIN_21>,
         Output<'static, PIN_20>,
     >,
@@ -52,8 +53,14 @@ async fn main(spawner: Spawner) {
 
     let mac_addr = [0x02, 0x00, 0x00, 0x00, 0x00, 0x00];
     let state = make_static!(State::<8, 8>::new());
-    let (device, runner) =
-        embassy_net_w5500::new(mac_addr, state, ExclusiveDevice::new(spi, cs), w5500_int, w5500_reset).await;
+    let (device, runner) = embassy_net_w5500::new(
+        mac_addr,
+        state,
+        ExclusiveDevice::new(spi, cs, Delay),
+        w5500_int,
+        w5500_reset,
+    )
+    .await;
     unwrap!(spawner.spawn(ethernet_task(runner)));
 
     // Generate random seed
@@ -62,7 +69,7 @@ async fn main(spawner: Spawner) {
     // Init network stack
     let stack = &*make_static!(Stack::new(
         device,
-        embassy_net::Config::Dhcp(Default::default()),
+        embassy_net::Config::dhcpv4(Default::default()),
         make_static!(StackResources::<2>::new()),
         seed
     ));
@@ -95,9 +102,9 @@ async fn main(spawner: Spawner) {
     }
 }
 
-async fn wait_for_config(stack: &'static Stack<Device<'static>>) -> embassy_net::StaticConfig {
+async fn wait_for_config(stack: &'static Stack<Device<'static>>) -> embassy_net::StaticConfigV4 {
     loop {
-        if let Some(config) = stack.config() {
+        if let Some(config) = stack.config_v4() {
             return config.clone();
         }
         yield_now().await;

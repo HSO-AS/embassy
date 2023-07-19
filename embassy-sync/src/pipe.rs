@@ -282,7 +282,7 @@ where
     /// returns the amount of bytes written.
     ///
     /// If it is not possible to write a nonzero amount of bytes because the pipe's buffer is full,
-    /// this method will wait until it is. See [`try_write`](Self::try_write) for a variant that
+    /// this method will wait until it isn't. See [`try_write`](Self::try_write) for a variant that
     /// returns an error instead of waiting.
     ///
     /// It is not guaranteed that all bytes in the buffer are written, even if there's enough
@@ -292,6 +292,16 @@ where
     /// `write_all` from the `embedded-io` crate.
     pub fn write<'a>(&'a self, buf: &'a [u8]) -> WriteFuture<'a, M, N> {
         WriteFuture { pipe: self, buf }
+    }
+
+    /// Write all bytes to the pipe.
+    ///
+    /// This method writes all bytes from `buf` into the pipe
+    pub async fn write_all(&self, mut buf: &[u8]) {
+        while !buf.is_empty() {
+            let n = self.write(buf).await;
+            buf = &buf[n..];
+        }
     }
 
     /// Attempt to immediately write some bytes to the pipe.
@@ -309,7 +319,7 @@ where
     /// returns the amount of bytes read.
     ///
     /// If it is not possible to read a nonzero amount of bytes because the pipe's buffer is empty,
-    /// this method will wait until it is. See [`try_read`](Self::try_read) for a variant that
+    /// this method will wait until it isn't. See [`try_read`](Self::try_read) for a variant that
     /// returns an error instead of waiting.
     ///
     /// It is not guaranteed that all bytes in the buffer are read, even if there's enough
