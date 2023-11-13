@@ -28,17 +28,23 @@ pub(crate) unsafe fn lock() {
 pub(crate) unsafe fn unlock() {
     #[cfg(any(flash_wl, flash_wb, flash_l4))]
     {
-        pac::FLASH.keyr().write(|w| w.set_keyr(0x4567_0123));
-        pac::FLASH.keyr().write(|w| w.set_keyr(0xCDEF_89AB));
+        if pac::FLASH.cr().read().lock() {
+            pac::FLASH.keyr().write(|w| w.set_keyr(0x4567_0123));
+            pac::FLASH.keyr().write(|w| w.set_keyr(0xCDEF_89AB));
+        }
     }
 
     #[cfg(any(flash_l0, flash_l1))]
     {
-        pac::FLASH.pekeyr().write(|w| w.set_pekeyr(0x89ABCDEF));
-        pac::FLASH.pekeyr().write(|w| w.set_pekeyr(0x02030405));
+        if pac::FLASH.pecr().read().pelock() {
+            pac::FLASH.pekeyr().write(|w| w.set_pekeyr(0x89ABCDEF));
+            pac::FLASH.pekeyr().write(|w| w.set_pekeyr(0x02030405));
+        }
 
-        pac::FLASH.prgkeyr().write(|w| w.set_prgkeyr(0x8C9DAEBF));
-        pac::FLASH.prgkeyr().write(|w| w.set_prgkeyr(0x13141516));
+        if pac::FLASH.pecr().read().prglock() {
+            pac::FLASH.prgkeyr().write(|w| w.set_prgkeyr(0x8C9DAEBF));
+            pac::FLASH.prgkeyr().write(|w| w.set_prgkeyr(0x13141516));
+        }
     }
 }
 
@@ -113,41 +119,9 @@ pub(crate) unsafe fn blocking_erase_sector(sector: &FlashSector) -> Result<(), E
 }
 
 pub(crate) unsafe fn clear_all_err() {
-    pac::FLASH.sr().modify(|w| {
-        #[cfg(any(flash_wl, flash_wb, flash_l4, flash_l0))]
-        if w.rderr() {
-            w.set_rderr(true);
-        }
-        #[cfg(any(flash_wl, flash_wb, flash_l4))]
-        if w.fasterr() {
-            w.set_fasterr(true);
-        }
-        #[cfg(any(flash_wl, flash_wb, flash_l4))]
-        if w.miserr() {
-            w.set_miserr(true);
-        }
-        #[cfg(any(flash_wl, flash_wb, flash_l4))]
-        if w.pgserr() {
-            w.set_pgserr(true);
-        }
-        if w.sizerr() {
-            w.set_sizerr(true);
-        }
-        if w.pgaerr() {
-            w.set_pgaerr(true);
-        }
-        if w.wrperr() {
-            w.set_wrperr(true);
-        }
-        #[cfg(any(flash_wl, flash_wb, flash_l4))]
-        if w.progerr() {
-            w.set_progerr(true);
-        }
-        #[cfg(any(flash_wl, flash_wb, flash_l4))]
-        if w.operr() {
-            w.set_operr(true);
-        }
-    });
+    // read and write back the same value.
+    // This clears all "write 0 to clear" bits.
+    pac::FLASH.sr().modify(|_| {});
 }
 
 unsafe fn wait_ready_blocking() -> Result<(), Error> {

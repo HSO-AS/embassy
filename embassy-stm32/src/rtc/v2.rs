@@ -1,80 +1,19 @@
 use stm32_metapac::rtc::vals::{Init, Osel, Pol};
 
-use super::{sealed, Instance, RtcConfig};
+use super::sealed;
 use crate::pac::rtc::Rtc;
+use crate::peripherals::RTC;
+use crate::rtc::sealed::Instance;
 
-impl<'d, T: Instance> super::Rtc<'d, T> {
+#[allow(dead_code)]
+impl super::Rtc {
     /// Applies the RTC config
     /// It this changes the RTC clock source the time will be reset
-    pub(super) fn apply_config(&mut self, rtc_config: RtcConfig) {
-        // Unlock the backup domain
-        let clock_config = rtc_config.clock_config as u8;
-
-        #[cfg(not(rtc_v2wb))]
-        use stm32_metapac::rcc::vals::Rtcsel;
-
-        #[cfg(any(rtc_v2f2, rtc_v2f3, rtc_v2l1))]
-        let cr = crate::pac::PWR.cr();
-        #[cfg(any(rtc_v2f4, rtc_v2f7, rtc_v2h7, rtc_v2l4, rtc_v2wb))]
-        let cr = crate::pac::PWR.cr1();
-
-        // TODO: Missing from PAC for l0 and f0?
-        #[cfg(not(any(rtc_v2f0, rtc_v2l0)))]
-        {
-            cr.modify(|w| w.set_dbp(true));
-            while !cr.read().dbp() {}
-        }
-
-        #[cfg(not(any(rtc_v2l0, rtc_v2l1)))]
-        let reg = crate::pac::RCC.bdcr().read();
-        #[cfg(any(rtc_v2l0, rtc_v2l1))]
-        let reg = crate::pac::RCC.csr().read();
-
-        #[cfg(any(rtc_v2h7, rtc_v2l4, rtc_v2wb))]
-        assert!(!reg.lsecsson(), "RTC is not compatible with LSE CSS, yet.");
-
-        #[cfg(rtc_v2wb)]
-        let rtcsel = reg.rtcsel();
-        #[cfg(not(rtc_v2wb))]
-        let rtcsel = reg.rtcsel().to_bits();
-
-        if !reg.rtcen() || rtcsel != clock_config {
-            #[cfg(not(any(rtc_v2l0, rtc_v2l1)))]
-            crate::pac::RCC.bdcr().modify(|w| w.set_bdrst(true));
-
-            #[cfg(not(any(rtc_v2l0, rtc_v2l1)))]
-            let cr = crate::pac::RCC.bdcr();
-            #[cfg(any(rtc_v2l0, rtc_v2l1))]
-            let cr = crate::pac::RCC.csr();
-
-            cr.modify(|w| {
-                // Reset
-                #[cfg(not(any(rtc_v2l0, rtc_v2l1)))]
-                w.set_bdrst(false);
-
-                // Select RTC source
-                #[cfg(not(rtc_v2wb))]
-                w.set_rtcsel(Rtcsel::from_bits(clock_config));
-                #[cfg(rtc_v2wb)]
-                w.set_rtcsel(clock_config);
-                w.set_rtcen(true);
-
-                // Restore bcdr
-                #[cfg(any(rtc_v2l4, rtc_v2wb))]
-                w.set_lscosel(reg.lscosel());
-                #[cfg(any(rtc_v2l4, rtc_v2wb))]
-                w.set_lscoen(reg.lscoen());
-
-                w.set_lseon(reg.lseon());
-
-                #[cfg(any(rtc_v2f0, rtc_v2f7, rtc_v2h7, rtc_v2l4, rtc_v2wb))]
-                w.set_lsedrv(reg.lsedrv());
-                w.set_lsebyp(reg.lsebyp());
-            });
-        }
-
+    pub(super) fn configure(&mut self, async_psc: u8, sync_psc: u16) {
         self.write(true, |rtc| {
             rtc.cr().modify(|w| {
+                #[cfg(not(rtc_v2f2))]
+                w.set_bypshad(true);
                 #[cfg(rtc_v2f2)]
                 w.set_fmt(false);
                 #[cfg(not(rtc_v2f2))]
@@ -84,12 +23,10 @@ impl<'d, T: Instance> super::Rtc<'d, T> {
             });
 
             rtc.prer().modify(|w| {
-                w.set_prediv_s(rtc_config.sync_prescaler);
-                w.set_prediv_a(rtc_config.async_prescaler);
+                w.set_prediv_s(sync_psc);
+                w.set_prediv_a(async_psc);
             });
         });
-
-        self.rtc_config = rtc_config;
     }
 
     /// Calibrate the clock drift.
@@ -157,11 +94,11 @@ impl<'d, T: Instance> super::Rtc<'d, T> {
         })
     }
 
-    pub(super) fn write<F, R>(&mut self, init_mode: bool, f: F) -> R
+    pub(super) fn write<F, R>(&self, init_mode: bool, f: F) -> R
     where
         F: FnOnce(&crate::pac::rtc::Rtc) -> R,
     {
-        let r = T::regs();
+        let r = RTC::regs();
         // Disable write protection.
         // This is safe, as we're only writin the correct and expected values.
         r.wpr().write(|w| w.set_key(0xca));
@@ -192,16 +129,17 @@ impl<'d, T: Instance> super::Rtc<'d, T> {
 impl sealed::Instance for crate::peripherals::RTC {
     const BACKUP_REGISTER_COUNT: usize = 20;
 
-    fn enable_peripheral_clk() {
-        #[cfg(any(rtc_v2l4, rtc_v2wb))]
-        {
-            // enable peripheral clock for communication
-            crate::pac::RCC.apb1enr1().modify(|w| w.set_rtcapben(true));
+    #[cfg(all(feature = "low-power", stm32f4))]
+    const EXTI_WAKEUP_LINE: usize = 22;
 
-            // read to allow the pwr clock to enable
-            crate::pac::PWR.cr1().read();
-        }
-    }
+    #[cfg(all(feature = "low-power", stm32l0))]
+    const EXTI_WAKEUP_LINE: usize = 20;
+
+    #[cfg(all(feature = "low-power", stm32f4))]
+    type WakeupInterrupt = crate::interrupt::typelevel::RTC_WKUP;
+
+    #[cfg(all(feature = "low-power", stm32l0))]
+    type WakeupInterrupt = crate::interrupt::typelevel::RTC;
 
     fn read_backup_register(rtc: &Rtc, register: usize) -> Option<u32> {
         if register < Self::BACKUP_REGISTER_COUNT {
@@ -217,5 +155,3 @@ impl sealed::Instance for crate::peripherals::RTC {
         }
     }
 }
-
-impl Instance for crate::peripherals::RTC {}

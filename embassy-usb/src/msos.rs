@@ -1,12 +1,10 @@
-#![cfg(feature = "msos-descriptor")]
-
 //! Microsoft OS Descriptors
 //!
 //! <https://docs.microsoft.com/en-us/windows-hardware/drivers/usbcon/microsoft-os-2-0-descriptors-specification>
 
 use core::mem::size_of;
 
-use super::{capability_type, BosWriter};
+use crate::descriptor::{capability_type, BosWriter};
 use crate::types::InterfaceNumber;
 
 /// A serialized Microsoft OS 2.0 Descriptor set.
@@ -526,7 +524,7 @@ impl<'a> PropertyData<'a> {
             PropertyData::Binary(val) => val.len(),
             PropertyData::DwordLittleEndian(val) | PropertyData::DwordBigEndian(val) => core::mem::size_of_val(val),
             PropertyData::RegMultiSz(val) => {
-                core::mem::size_of::<u16>() * val.iter().map(|x| x.encode_utf16().count() + 1).sum::<usize>() + 1
+                core::mem::size_of::<u16>() * (val.iter().map(|x| x.encode_utf16().count() + 1).sum::<usize>() + 1)
             }
         }
     }

@@ -3,8 +3,8 @@
 use core::future::poll_fn;
 use core::task::Poll;
 
-use embassy_hal_common::drop::OnDrop;
-use embassy_hal_common::{into_ref, PeripheralRef};
+use embassy_hal_internal::drop::OnDrop;
+use embassy_hal_internal::{into_ref, PeripheralRef};
 use embassy_sync::waitqueue::AtomicWaker;
 use fixed::types::I30F2;
 
@@ -57,7 +57,6 @@ impl<'d> Temp<'d> {
     /// ```no_run
     /// use embassy_nrf::{bind_interrupts, temp};
     /// use embassy_nrf::temp::Temp;
-    /// use embassy_time::{Duration, Timer};
     ///
     /// bind_interrupts!(struct Irqs {
     ///     TEMP => temp::InterruptHandler;

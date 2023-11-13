@@ -8,7 +8,7 @@ pub mod generic_smi;
 use core::mem::MaybeUninit;
 use core::task::Context;
 
-use embassy_net_driver::{Capabilities, LinkState};
+use embassy_net_driver::{Capabilities, HardwareAddress, LinkState};
 use embassy_sync::waitqueue::AtomicWaker;
 
 pub use self::_version::{InterruptHandler, *};
@@ -88,8 +88,8 @@ impl<'d, T: Instance, P: PHY> embassy_net_driver::Driver for Ethernet<'d, T, P> 
         }
     }
 
-    fn ethernet_address(&self) -> [u8; 6] {
-        self.mac_addr
+    fn hardware_address(&self) -> HardwareAddress {
+        HardwareAddress::Ethernet(self.mac_addr)
     }
 }
 
@@ -134,9 +134,9 @@ impl<'a, 'd> embassy_net_driver::TxToken for TxToken<'a, 'd> {
 /// The methods cannot move out of self
 pub unsafe trait StationManagement {
     /// Read a register over SMI.
-    fn smi_read(&mut self, reg: u8) -> u16;
+    fn smi_read(&mut self, phy_addr: u8, reg: u8) -> u16;
     /// Write a register over SMI.
-    fn smi_write(&mut self, reg: u8, val: u16);
+    fn smi_write(&mut self, phy_addr: u8, reg: u8, val: u16);
 }
 
 /// Traits for an Ethernet PHY

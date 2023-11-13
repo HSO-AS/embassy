@@ -1,8 +1,12 @@
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(feature = "nightly", feature(async_fn_in_trait, impl_trait_projections))]
+#![cfg_attr(feature = "nightly", allow(stable_features, unknown_lints, async_fn_in_trait))]
+
+//! ## Feature flags
+#![doc = document_features::document_features!(feature_label = r#"<span class="stab portability"><code>{feature}</code></span>"#)]
 
 // This must go FIRST so that all the other modules see its macros.
-pub mod fmt;
+mod fmt;
 include!(concat!(env!("OUT_DIR"), "/_macros.rs"));
 
 // Utilities
@@ -23,6 +27,8 @@ pub mod timer;
 pub mod adc;
 #[cfg(can)]
 pub mod can;
+#[cfg(crc)]
+pub mod crc;
 #[cfg(dac)]
 pub mod dac;
 #[cfg(dcmi)]
@@ -31,25 +37,29 @@ pub mod dcmi;
 pub mod eth;
 #[cfg(feature = "exti")]
 pub mod exti;
+pub mod flash;
 #[cfg(fmc)]
 pub mod fmc;
+#[cfg(hrtim)]
+pub mod hrtim;
 #[cfg(i2c)]
 pub mod i2c;
-
-#[cfg(crc)]
-pub mod crc;
-pub mod flash;
 #[cfg(all(spi_v1, rcc_f4))]
 pub mod i2s;
 #[cfg(stm32wb)]
 pub mod ipcc;
-pub mod pwm;
+#[cfg(feature = "low-power")]
+pub mod low_power;
+#[cfg(opamp)]
+pub mod opamp;
 #[cfg(quadspi)]
 pub mod qspi;
 #[cfg(rng)]
 pub mod rng;
 #[cfg(all(rtc, not(rtc_v1)))]
 pub mod rtc;
+#[cfg(sai)]
+pub mod sai;
 #[cfg(sdmmc)]
 pub mod sdmmc;
 #[cfg(spi)]
@@ -79,10 +89,11 @@ pub use crate::_generated::interrupt;
 /// This defines the right interrupt handlers, and creates a unit struct (like `struct Irqs;`)
 /// and implements the right [`Binding`]s for it. You can pass this struct to drivers to
 /// prove at compile-time that the right interrupts have been bound.
-// developer note: this macro can't be in `embassy-hal-common` due to the use of `$crate`.
+// developer note: this macro can't be in `embassy-hal-internal` due to the use of `$crate`.
 #[macro_export]
 macro_rules! bind_interrupts {
     ($vis:vis struct $name:ident { $($irq:ident => $($handler:ty),*;)* }) => {
+        #[derive(Copy, Clone)]
         $vis struct $name;
 
         $(
@@ -103,7 +114,7 @@ macro_rules! bind_interrupts {
 
 // Reexports
 pub use _generated::{peripherals, Peripherals};
-pub use embassy_hal_common::{into_ref, Peripheral, PeripheralRef};
+pub use embassy_hal_internal::{into_ref, Peripheral, PeripheralRef};
 #[cfg(feature = "unstable-pac")]
 pub use stm32_metapac as pac;
 #[cfg(not(feature = "unstable-pac"))]
@@ -112,6 +123,7 @@ pub(crate) use stm32_metapac as pac;
 use crate::interrupt::Priority;
 #[cfg(feature = "rt")]
 pub use crate::pac::NVIC_PRIO_BITS;
+use crate::rcc::sealed::RccPeripheral;
 
 #[non_exhaustive]
 pub struct Config {
@@ -144,55 +156,83 @@ impl Default for Config {
 
 /// Initialize embassy.
 pub fn init(config: Config) -> Peripherals {
-    let p = Peripherals::take();
+    critical_section::with(|cs| {
+        let p = Peripherals::take_with_cs(cs);
 
-    #[cfg(dbgmcu)]
-    if config.enable_debug_during_sleep {
-        crate::pac::DBGMCU.cr().modify(|cr| {
-            #[cfg(any(dbgmcu_f0, dbgmcu_c0, dbgmcu_g0, dbgmcu_u5))]
+        #[cfg(dbgmcu)]
+        if config.enable_debug_during_sleep {
+            crate::pac::DBGMCU.cr().modify(|cr| {
+                #[cfg(any(dbgmcu_f0, dbgmcu_c0, dbgmcu_g0, dbgmcu_u5, dbgmcu_wba))]
+                {
+                    cr.set_dbg_stop(true);
+                    cr.set_dbg_standby(true);
+                }
+                #[cfg(any(
+                    dbgmcu_f1, dbgmcu_f2, dbgmcu_f3, dbgmcu_f4, dbgmcu_f7, dbgmcu_g4, dbgmcu_f7, dbgmcu_l0, dbgmcu_l1,
+                    dbgmcu_l4, dbgmcu_wb, dbgmcu_wl
+                ))]
+                {
+                    cr.set_dbg_sleep(true);
+                    cr.set_dbg_stop(true);
+                    cr.set_dbg_standby(true);
+                }
+                #[cfg(dbgmcu_h7)]
+                {
+                    cr.set_d1dbgcken(true);
+                    cr.set_d3dbgcken(true);
+                    cr.set_dbgsleep_d1(true);
+                    cr.set_dbgstby_d1(true);
+                    cr.set_dbgstop_d1(true);
+                }
+            });
+        }
+
+        #[cfg(not(any(stm32f1, stm32wb, stm32wl)))]
+        peripherals::SYSCFG::enable_and_reset_with_cs(cs);
+        #[cfg(not(any(stm32h5, stm32h7, stm32wb, stm32wl)))]
+        peripherals::PWR::enable_and_reset_with_cs(cs);
+        #[cfg(not(any(stm32f2, stm32f4, stm32f7, stm32l0, stm32h5, stm32h7)))]
+        peripherals::FLASH::enable_and_reset_with_cs(cs);
+
+        unsafe {
+            #[cfg(feature = "_split-pins-enabled")]
+            crate::pac::SYSCFG.pmcr().modify(|pmcr| {
+                #[cfg(feature = "split-pa0")]
+                pmcr.set_pa0so(true);
+                #[cfg(feature = "split-pa1")]
+                pmcr.set_pa1so(true);
+                #[cfg(feature = "split-pc2")]
+                pmcr.set_pc2so(true);
+                #[cfg(feature = "split-pc3")]
+                pmcr.set_pc3so(true);
+            });
+
+            gpio::init(cs);
+            dma::init(
+                cs,
+                #[cfg(bdma)]
+                config.bdma_interrupt_priority,
+                #[cfg(dma)]
+                config.dma_interrupt_priority,
+                #[cfg(gpdma)]
+                config.gpdma_interrupt_priority,
+            );
+            #[cfg(feature = "exti")]
+            exti::init(cs);
+
+            rcc::init(config.rcc);
+
+            // must be after rcc init
+            #[cfg(feature = "_time-driver")]
+            time_driver::init(cs);
+
+            #[cfg(feature = "low-power")]
             {
-                cr.set_dbg_stop(true);
-                cr.set_dbg_standby(true);
+                crate::rcc::REFCOUNT_STOP2 = 0;
+                crate::rcc::REFCOUNT_STOP1 = 0;
             }
-            #[cfg(any(
-                dbgmcu_f1, dbgmcu_f2, dbgmcu_f3, dbgmcu_f4, dbgmcu_f7, dbgmcu_g4, dbgmcu_f7, dbgmcu_l0, dbgmcu_l1,
-                dbgmcu_l4, dbgmcu_wb, dbgmcu_wl
-            ))]
-            {
-                cr.set_dbg_sleep(true);
-                cr.set_dbg_stop(true);
-                cr.set_dbg_standby(true);
-            }
-            #[cfg(dbgmcu_h7)]
-            {
-                cr.set_d1dbgcken(true);
-                cr.set_d3dbgcken(true);
-                cr.set_dbgsleep_d1(true);
-                cr.set_dbgstby_d1(true);
-                cr.set_dbgstop_d1(true);
-            }
-        });
-    }
+        }
 
-    unsafe {
-        gpio::init();
-        dma::init(
-            #[cfg(bdma)]
-            config.bdma_interrupt_priority,
-            #[cfg(dma)]
-            config.dma_interrupt_priority,
-            #[cfg(gpdma)]
-            config.gpdma_interrupt_priority,
-        );
-        #[cfg(feature = "exti")]
-        exti::init();
-
-        rcc::init(config.rcc);
-
-        // must be after rcc init
-        #[cfg(feature = "_time-driver")]
-        time_driver::init();
-    }
-
-    p
+        p
+    })
 }

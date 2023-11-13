@@ -6,8 +6,8 @@ use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 use core::task::Poll;
 
-use embassy_hal_common::drop::OnDrop;
-use embassy_hal_common::{into_ref, PeripheralRef};
+use embassy_hal_internal::drop::OnDrop;
+use embassy_hal_internal::{into_ref, PeripheralRef};
 use embassy_sync::waitqueue::AtomicWaker;
 use sdio_host::{BusWidth, CardCapacity, CardStatus, CurrentState, SDStatus, CID, CSD, OCR, SCR};
 
@@ -33,6 +33,8 @@ impl<T: Instance> InterruptHandler<T> {
             w.set_dtimeoutie(enable);
             w.set_dataendie(enable);
 
+            #[cfg(sdmmc_v1)]
+            w.set_stbiterre(enable);
             #[cfg(sdmmc_v2)]
             w.set_dabortie(enable);
         });
@@ -102,6 +104,8 @@ pub enum Error {
     BadClock,
     SignalingSwitchFailed,
     PeripheralBusy,
+    #[cfg(sdmmc_v1)]
+    StBitErr,
 }
 
 /// A SD command
@@ -225,6 +229,9 @@ const DMA_TRANSFER_OPTIONS: crate::dma::TransferOptions = crate::dma::TransferOp
     mburst: crate::dma::Burst::Incr4,
     flow_ctrl: crate::dma::FlowControl::Peripheral,
     fifo_threshold: Some(crate::dma::FifoThreshold::Full),
+    circular: false,
+    half_transfer_ir: false,
+    complete_transfer_ir: true,
 };
 #[cfg(all(sdmmc_v1, not(dma)))]
 const DMA_TRANSFER_OPTIONS: crate::dma::TransferOptions = crate::dma::TransferOptions {
@@ -445,8 +452,7 @@ impl<'d, T: Instance, Dma: SdmmcDma<T> + 'd> Sdmmc<'d, T, Dma> {
     ) -> Self {
         into_ref!(sdmmc, dma);
 
-        T::enable();
-        T::reset();
+        T::enable_and_reset();
 
         T::Interrupt::unpend();
         unsafe { T::Interrupt::enable() };
@@ -704,9 +710,15 @@ impl<'d, T: Instance, Dma: SdmmcDma<T> + 'd> Sdmmc<'d, T, Dma> {
 
             if status.dcrcfail() {
                 return Poll::Ready(Err(Error::Crc));
-            } else if status.dtimeout() {
+            }
+            if status.dtimeout() {
                 return Poll::Ready(Err(Error::Timeout));
-            } else if status.dataend() {
+            }
+            #[cfg(sdmmc_v1)]
+            if status.stbiterr() {
+                return Poll::Ready(Err(Error::StBitErr));
+            }
+            if status.dataend() {
                 return Poll::Ready(Ok(()));
             }
             Poll::Pending
@@ -779,9 +791,15 @@ impl<'d, T: Instance, Dma: SdmmcDma<T> + 'd> Sdmmc<'d, T, Dma> {
 
             if status.dcrcfail() {
                 return Poll::Ready(Err(Error::Crc));
-            } else if status.dtimeout() {
+            }
+            if status.dtimeout() {
                 return Poll::Ready(Err(Error::Timeout));
-            } else if status.dataend() {
+            }
+            #[cfg(sdmmc_v1)]
+            if status.stbiterr() {
+                return Poll::Ready(Err(Error::StBitErr));
+            }
+            if status.dataend() {
                 return Poll::Ready(Ok(()));
             }
             Poll::Pending
@@ -833,6 +851,8 @@ impl<'d, T: Instance, Dma: SdmmcDma<T> + 'd> Sdmmc<'d, T, Dma> {
             w.set_dataendc(true);
             w.set_dbckendc(true);
             w.set_sdioitc(true);
+            #[cfg(sdmmc_v1)]
+            w.set_stbiterrc(true);
 
             #[cfg(sdmmc_v2)]
             {
@@ -870,9 +890,15 @@ impl<'d, T: Instance, Dma: SdmmcDma<T> + 'd> Sdmmc<'d, T, Dma> {
 
             if status.dcrcfail() {
                 return Poll::Ready(Err(Error::Crc));
-            } else if status.dtimeout() {
+            }
+            if status.dtimeout() {
                 return Poll::Ready(Err(Error::Timeout));
-            } else if status.dataend() {
+            }
+            #[cfg(sdmmc_v1)]
+            if status.stbiterr() {
+                return Poll::Ready(Err(Error::StBitErr));
+            }
+            if status.dataend() {
                 return Poll::Ready(Ok(()));
             }
             Poll::Pending
@@ -1153,9 +1179,15 @@ impl<'d, T: Instance, Dma: SdmmcDma<T> + 'd> Sdmmc<'d, T, Dma> {
 
             if status.dcrcfail() {
                 return Poll::Ready(Err(Error::Crc));
-            } else if status.dtimeout() {
+            }
+            if status.dtimeout() {
                 return Poll::Ready(Err(Error::Timeout));
-            } else if status.dataend() {
+            }
+            #[cfg(sdmmc_v1)]
+            if status.stbiterr() {
+                return Poll::Ready(Err(Error::StBitErr));
+            }
+            if status.dataend() {
                 return Poll::Ready(Ok(()));
             }
             Poll::Pending
@@ -1204,9 +1236,15 @@ impl<'d, T: Instance, Dma: SdmmcDma<T> + 'd> Sdmmc<'d, T, Dma> {
 
             if status.dcrcfail() {
                 return Poll::Ready(Err(Error::Crc));
-            } else if status.dtimeout() {
+            }
+            if status.dtimeout() {
                 return Poll::Ready(Err(Error::Timeout));
-            } else if status.dataend() {
+            }
+            #[cfg(sdmmc_v1)]
+            if status.stbiterr() {
+                return Poll::Ready(Err(Error::StBitErr));
+            }
+            if status.dataend() {
                 return Poll::Ready(Ok(()));
             }
             Poll::Pending
@@ -1419,7 +1457,7 @@ cfg_if::cfg_if! {
         macro_rules! kernel_clk {
             ($inst:ident) => {
                 critical_section::with(|_| unsafe {
-                    crate::rcc::get_freqs().pll48
+                    crate::rcc::get_freqs().pll1_q
                 }).expect("PLL48 is required for SDIO")
             }
         }
@@ -1428,20 +1466,20 @@ cfg_if::cfg_if! {
             (SDMMC1) => {
                 critical_section::with(|_| unsafe {
                     let sdmmcsel = crate::pac::RCC.dckcfgr2().read().sdmmc1sel();
-                    if sdmmcsel == crate::pac::rcc::vals::Sdmmcsel::SYSCLK {
+                    if sdmmcsel == crate::pac::rcc::vals::Sdmmcsel::SYS {
                         crate::rcc::get_freqs().sys
                     } else {
-                        crate::rcc::get_freqs().pll48.expect("PLL48 is required for SDMMC")
+                        crate::rcc::get_freqs().pll1_q.expect("PLL48 is required for SDMMC")
                     }
                 })
             };
             (SDMMC2) => {
                 critical_section::with(|_| unsafe {
                     let sdmmcsel = crate::pac::RCC.dckcfgr2().read().sdmmc2sel();
-                    if sdmmcsel == crate::pac::rcc::vals::Sdmmcsel::SYSCLK {
+                    if sdmmcsel == crate::pac::rcc::vals::Sdmmcsel::SYS {
                         crate::rcc::get_freqs().sys
                     } else {
-                        crate::rcc::get_freqs().pll48.expect("PLL48 is required for SDMMC")
+                        crate::rcc::get_freqs().pll1_q.expect("PLL48 is required for SDMMC")
                     }
                 })
             };

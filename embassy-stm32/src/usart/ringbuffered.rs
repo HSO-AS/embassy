@@ -1,17 +1,28 @@
 use core::future::poll_fn;
+use core::mem;
 use core::sync::atomic::{compiler_fence, Ordering};
 use core::task::Poll;
 
-use embassy_hal_common::PeripheralRef;
+use embassy_embedded_hal::SetConfig;
+use embassy_hal_internal::PeripheralRef;
 use futures::future::{select, Either};
 
-use super::{clear_interrupt_flags, rdr, sr, BasicInstance, Error, UartRx};
-use crate::dma::RingBuffer;
+use super::{clear_interrupt_flags, rdr, reconfigure, sr, BasicInstance, Config, ConfigError, Error, UartRx};
+use crate::dma::ReadableRingBuffer;
 use crate::usart::{Regs, Sr};
 
 pub struct RingBufferedUartRx<'d, T: BasicInstance, RxDma: super::RxDma<T>> {
     _peri: PeripheralRef<'d, T>,
-    ring_buf: RingBuffer<'d, RxDma, u8>,
+    ring_buf: ReadableRingBuffer<'d, RxDma, u8>,
+}
+
+impl<'d, T: BasicInstance, RxDma: super::RxDma<T>> SetConfig for RingBufferedUartRx<'d, T, RxDma> {
+    type Config = Config;
+    type ConfigError = ConfigError;
+
+    fn set_config(&mut self, config: &Self::Config) -> Result<(), Self::ConfigError> {
+        self.set_config(config)
+    }
 }
 
 impl<'d, T: BasicInstance, RxDma: super::RxDma<T>> UartRx<'d, T, RxDma> {
@@ -19,17 +30,21 @@ impl<'d, T: BasicInstance, RxDma: super::RxDma<T>> UartRx<'d, T, RxDma> {
     /// without the possibility of loosing bytes. The `dma_buf` is a buffer registered to the
     /// DMA controller, and must be sufficiently large, such that it will not overflow.
     pub fn into_ring_buffered(self, dma_buf: &'d mut [u8]) -> RingBufferedUartRx<'d, T, RxDma> {
-        assert!(dma_buf.len() > 0 && dma_buf.len() <= 0xFFFF);
+        assert!(!dma_buf.is_empty() && dma_buf.len() <= 0xFFFF);
 
         let request = self.rx_dma.request();
         let opts = Default::default();
 
-        let ring_buf = unsafe { RingBuffer::new_read(self.rx_dma, request, rdr(T::regs()), dma_buf, opts) };
+        // Safety: we forget the struct before this function returns.
+        let rx_dma = unsafe { self.rx_dma.clone_unchecked() };
+        let _peri = unsafe { self._peri.clone_unchecked() };
 
-        RingBufferedUartRx {
-            _peri: self._peri,
-            ring_buf,
-        }
+        let ring_buf = unsafe { ReadableRingBuffer::new_read(rx_dma, request, rdr(T::regs()), dma_buf, opts) };
+
+        // Don't disable the clock
+        mem::forget(self);
+
+        RingBufferedUartRx { _peri, ring_buf }
     }
 }
 
@@ -47,6 +62,11 @@ impl<'d, T: BasicInstance, RxDma: super::RxDma<T>> RingBufferedUartRx<'d, T, RxD
         self.teardown_uart();
 
         Err(err)
+    }
+
+    pub fn set_config(&mut self, config: &Config) -> Result<(), ConfigError> {
+        self.teardown_uart();
+        reconfigure::<T>(config)
     }
 
     /// Start uart background receive
@@ -111,10 +131,9 @@ impl<'d, T: BasicInstance, RxDma: super::RxDma<T>> RingBufferedUartRx<'d, T, RxD
         let r = T::regs();
 
         // Start background receive if it was not already started
-        match r.cr3().read().dmar() {
-            false => self.start()?,
-            _ => {}
-        };
+        if !r.cr3().read().dmar() {
+            self.start()?;
+        }
 
         check_for_errors(clear_idle_flag(T::regs()))?;
 
@@ -187,6 +206,8 @@ impl<'d, T: BasicInstance, RxDma: super::RxDma<T>> RingBufferedUartRx<'d, T, RxD
 impl<T: BasicInstance, RxDma: super::RxDma<T>> Drop for RingBufferedUartRx<'_, T, RxDma> {
     fn drop(&mut self) {
         self.teardown_uart();
+
+        T::disable();
     }
 }
 /// Return an error result if the Sr register has errors
@@ -221,13 +242,12 @@ fn clear_idle_flag(r: Regs) -> Sr {
 
 #[cfg(all(feature = "unstable-traits", feature = "nightly"))]
 mod eio {
-    use embedded_io::asynch::Read;
-    use embedded_io::Io;
+    use embedded_io_async::{ErrorType, Read};
 
     use super::RingBufferedUartRx;
     use crate::usart::{BasicInstance, Error, RxDma};
 
-    impl<T, Rx> Io for RingBufferedUartRx<'_, T, Rx>
+    impl<T, Rx> ErrorType for RingBufferedUartRx<'_, T, Rx>
     where
         T: BasicInstance,
         Rx: RxDma<T>,

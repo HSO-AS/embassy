@@ -4,6 +4,7 @@
 #![no_main]
 #![macro_use]
 #![feature(type_alias_impl_trait, async_fn_in_trait)]
+#![allow(stable_features, unknown_lints, async_fn_in_trait)]
 
 use defmt::info;
 use embassy_executor::Spawner;
@@ -11,7 +12,8 @@ use embassy_lora::iv::{InterruptHandler, Stm32wlInterfaceVariant};
 use embassy_stm32::bind_interrupts;
 use embassy_stm32::gpio::{Level, Output, Pin, Speed};
 use embassy_stm32::spi::Spi;
-use embassy_time::{Delay, Duration, Timer};
+use embassy_stm32::time::Hertz;
+use embassy_time::{Delay, Timer};
 use lora_phy::mod_params::*;
 use lora_phy::sx1261_2::SX1261_2;
 use lora_phy::LoRa;
@@ -26,7 +28,23 @@ bind_interrupts!(struct Irqs{
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
     let mut config = embassy_stm32::Config::default();
-    config.rcc.mux = embassy_stm32::rcc::ClockSrc::HSE32;
+    {
+        use embassy_stm32::rcc::*;
+        config.rcc.hse = Some(Hse {
+            freq: Hertz(32_000_000),
+            mode: HseMode::Bypass,
+            prescaler: HsePrescaler::DIV1,
+        });
+        config.rcc.mux = ClockSrc::PLL1_R;
+        config.rcc.pll = Some(Pll {
+            source: PllSource::HSE,
+            prediv: PllPreDiv::DIV2,
+            mul: PllMul::MUL6,
+            divp: None,
+            divq: Some(PllQDiv::DIV2), // PLL1_Q clock (32 / 2 * 6 / 2), used for RNG
+            divr: Some(PllRDiv::DIV2), // sysclk 48Mhz clock (32 / 2 * 6 / 2)
+        });
+    }
     let p = embassy_stm32::init(config);
 
     let spi = Spi::new_subghz(p.SUBGHZSPI, p.DMA1_CH1, p.DMA1_CH2);
@@ -37,10 +55,8 @@ async fn main(_spawner: Spawner) {
     let _ctrl3 = Output::new(p.PC3.degrade(), Level::High, Speed::High);
     let iv = Stm32wlInterfaceVariant::new(Irqs, None, Some(ctrl2)).unwrap();
 
-    let mut delay = Delay;
-
     let mut lora = {
-        match LoRa::new(SX1261_2::new(BoardType::Stm32wlSx1262, spi, iv), false, &mut delay).await {
+        match LoRa::new(SX1261_2::new(BoardType::Stm32wlSx1262, spi, iv), false, Delay).await {
             Ok(l) => l,
             Err(err) => {
                 info!("Radio error = {}", err);
@@ -53,7 +69,7 @@ async fn main(_spawner: Spawner) {
     let mut start_indicator = Output::new(p.PB15, Level::Low, Speed::Low);
 
     start_indicator.set_high();
-    Timer::after(Duration::from_secs(5)).await;
+    Timer::after_secs(5).await;
     start_indicator.set_low();
 
     let mut receiving_buffer = [00u8; 100];
@@ -84,7 +100,7 @@ async fn main(_spawner: Spawner) {
     };
 
     match lora
-        .prepare_for_rx(&mdltn_params, &rx_pkt_params, None, true, false, 0, 0x00ffffffu32)
+        .prepare_for_rx(&mdltn_params, &rx_pkt_params, None, None, false)
         .await
     {
         Ok(()) => {}
@@ -105,7 +121,7 @@ async fn main(_spawner: Spawner) {
                 {
                     info!("rx successful");
                     debug_indicator.set_high();
-                    Timer::after(Duration::from_secs(5)).await;
+                    Timer::after_secs(5).await;
                     debug_indicator.set_low();
                 } else {
                     info!("rx unknown packet");

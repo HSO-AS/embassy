@@ -12,9 +12,8 @@ use embassy_rp::peripherals::PIO0;
 use embassy_rp::pio::{
     Common, Config, FifoJoin, Instance, InterruptHandler, Pio, PioPin, ShiftConfig, ShiftDirection, StateMachine,
 };
-use embassy_rp::relocate::RelocatedProgram;
 use embassy_rp::{bind_interrupts, clocks, into_ref, Peripheral, PeripheralRef};
-use embassy_time::{Duration, Timer};
+use embassy_time::Timer;
 use fixed::types::U24F8;
 use fixed_macro::fixed;
 use smart_leds::RGB8;
@@ -73,8 +72,7 @@ impl<'d, P: Instance, const S: usize, const N: usize> Ws2812<'d, P, S, N> {
         cfg.set_out_pins(&[&out_pin]);
         cfg.set_set_pins(&[&out_pin]);
 
-        let relocated = RelocatedProgram::new(&prg);
-        cfg.use_program(&pio.load_program(&relocated), &[&out_pin]);
+        cfg.use_program(&pio.load_program(&prg), &[&out_pin]);
 
         // Clock config, measured in kHz to avoid overflows
         // TODO CLOCK_FREQ should come from embassy_rp
@@ -140,8 +138,9 @@ async fn main(_spawner: Spawner) {
     const NUM_LEDS: usize = 1;
     let mut data = [RGB8::default(); NUM_LEDS];
 
-    // For the thing plus, use pin 8
-    // For the feather, use pin 16
+    // Common neopixel pins:
+    // Thing plus: 8
+    // Adafruit Feather: 16;  Adafruit Feather+RFM95: 4
     let mut ws2812 = Ws2812::new(&mut common, sm0, p.DMA_CH0, p.PIN_16);
 
     // Loop forever making RGB values and pushing them out to the WS2812.
@@ -154,7 +153,7 @@ async fn main(_spawner: Spawner) {
             }
             ws2812.write(&data).await;
 
-            Timer::after(Duration::from_micros(5)).await;
+            Timer::after_millis(10).await;
         }
     }
 }

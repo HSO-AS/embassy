@@ -9,11 +9,11 @@ use embassy_net::{Stack, StackResources};
 use embassy_stm32::rcc::*;
 use embassy_stm32::rng::Rng;
 use embassy_stm32::usb::Driver;
-use embassy_stm32::{bind_interrupts, peripherals, usb, Config};
+use embassy_stm32::{bind_interrupts, peripherals, rng, usb, Config};
 use embassy_usb::class::cdc_ncm::embassy_net::{Device, Runner, State as NetState};
 use embassy_usb::class::cdc_ncm::{CdcNcmClass, State};
 use embassy_usb::{Builder, UsbDevice};
-use embedded_io::asynch::Write;
+use embedded_io_async::Write;
 use rand_core::RngCore;
 use static_cell::make_static;
 use {defmt_rtt as _, panic_probe as _};
@@ -24,6 +24,7 @@ const MTU: usize = 1514;
 
 bind_interrupts!(struct Irqs {
     USB_FS => usb::InterruptHandler<peripherals::USB>;
+    RNG => rng::InterruptHandler<peripherals::RNG>;
 });
 
 #[embassy_executor::task]
@@ -44,8 +45,17 @@ async fn net_task(stack: &'static Stack<Device<'static, MTU>>) -> ! {
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let mut config = Config::default();
-    config.rcc.mux = ClockSrc::PLL(PLLSource::HSI16, PLLClkDiv::Div2, PLLSrcDiv::Div1, PLLMul::Mul10, None);
-    config.rcc.hsi48 = true;
+    config.rcc.hsi = true;
+    config.rcc.mux = ClockSrc::PLL1_R;
+    config.rcc.pll = Some(Pll {
+        // 80Mhz clock (16 / 1 * 10 / 2)
+        source: PllSource::HSI,
+        prediv: PllPreDiv::DIV1,
+        mul: PllMul::MUL10,
+        divp: None,
+        divq: None,
+        divr: Some(PllRDiv::DIV2),
+    });
     let p = embassy_stm32::init(config);
 
     // Create the driver, from the HAL.
@@ -72,6 +82,7 @@ async fn main(spawner: Spawner) {
         &mut make_static!([0; 256])[..],
         &mut make_static!([0; 256])[..],
         &mut make_static!([0; 256])[..],
+        &mut [], // no msos descriptors
         &mut make_static!([0; 128])[..],
     );
 
@@ -99,7 +110,7 @@ async fn main(spawner: Spawner) {
     //});
 
     // Generate random seed
-    let mut rng = Rng::new(p.RNG);
+    let mut rng = Rng::new(p.RNG, Irqs);
     let seed = rng.next_u64();
 
     // Init network stack

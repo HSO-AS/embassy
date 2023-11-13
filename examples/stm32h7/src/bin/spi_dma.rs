@@ -34,21 +34,32 @@ fn main() -> ! {
     info!("Hello World!");
 
     let mut config = Config::default();
-    config.rcc.sys_ck = Some(mhz(400));
-    config.rcc.hclk = Some(mhz(200));
-    config.rcc.pll1.q_ck = Some(mhz(100));
+    {
+        use embassy_stm32::rcc::*;
+        config.rcc.hsi = Some(HSIPrescaler::DIV1);
+        config.rcc.csi = true;
+        config.rcc.pll1 = Some(Pll {
+            source: PllSource::HSI,
+            prediv: PllPreDiv::DIV4,
+            mul: PllMul::MUL50,
+            divp: Some(PllDiv::DIV2),
+            divq: Some(PllDiv::DIV8), // used by SPI3. 100Mhz.
+            divr: None,
+        });
+        config.rcc.sys = Sysclk::PLL1_P; // 400 Mhz
+        config.rcc.ahb_pre = AHBPrescaler::DIV2; // 200 Mhz
+        config.rcc.apb1_pre = APBPrescaler::DIV2; // 100 Mhz
+        config.rcc.apb2_pre = APBPrescaler::DIV2; // 100 Mhz
+        config.rcc.apb3_pre = APBPrescaler::DIV2; // 100 Mhz
+        config.rcc.apb4_pre = APBPrescaler::DIV2; // 100 Mhz
+        config.rcc.voltage_scale = VoltageScale::Scale1;
+    }
     let p = embassy_stm32::init(config);
 
-    let spi = spi::Spi::new(
-        p.SPI3,
-        p.PB3,
-        p.PB5,
-        p.PB4,
-        p.DMA1_CH3,
-        p.DMA1_CH4,
-        mhz(1),
-        spi::Config::default(),
-    );
+    let mut spi_config = spi::Config::default();
+    spi_config.frequency = mhz(1);
+
+    let spi = spi::Spi::new(p.SPI3, p.PB3, p.PB5, p.PB4, p.DMA1_CH3, p.DMA1_CH4, spi_config);
 
     let executor = EXECUTOR.init(Executor::new());
 

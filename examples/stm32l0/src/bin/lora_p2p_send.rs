@@ -23,21 +23,15 @@ const LORA_FREQUENCY_IN_HZ: u32 = 903_900_000; // warning: set this appropriatel
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
     let mut config = embassy_stm32::Config::default();
-    config.rcc.mux = embassy_stm32::rcc::ClockSrc::HSI16;
-    config.rcc.enable_hsi48 = true;
+    config.rcc.hsi = true;
+    config.rcc.mux = embassy_stm32::rcc::ClockSrc::HSI;
     let p = embassy_stm32::init(config);
 
+    let mut spi_config = spi::Config::default();
+    spi_config.frequency = khz(200);
+
     // SPI for sx1276
-    let spi = spi::Spi::new(
-        p.SPI1,
-        p.PB3,
-        p.PA7,
-        p.PA6,
-        p.DMA1_CH3,
-        p.DMA1_CH2,
-        khz(200),
-        spi::Config::default(),
-    );
+    let spi = spi::Spi::new(p.SPI1, p.PB3, p.PA7, p.PA6, p.DMA1_CH3, p.DMA1_CH2, spi_config);
 
     let nss = Output::new(p.PA15.degrade(), Level::High, Speed::Low);
     let reset = Output::new(p.PC0.degrade(), Level::High, Speed::Low);
@@ -47,10 +41,8 @@ async fn main(_spawner: Spawner) {
 
     let iv = Stm32l0InterfaceVariant::new(nss, reset, irq, None, None).unwrap();
 
-    let mut delay = Delay;
-
     let mut lora = {
-        match LoRa::new(SX1276_7_8_9::new(BoardType::Stm32l0Sx1276, spi, iv), false, &mut delay).await {
+        match LoRa::new(SX1276_7_8_9::new(BoardType::Stm32l0Sx1276, spi, iv), false, Delay).await {
             Ok(l) => l,
             Err(err) => {
                 info!("Radio error = {}", err);
@@ -103,7 +95,7 @@ async fn main(_spawner: Spawner) {
         }
     };
 
-    match lora.sleep(&mut delay).await {
+    match lora.sleep(false).await {
         Ok(()) => info!("Sleep successful"),
         Err(err) => info!("Sleep unsuccessful = {}", err),
     }

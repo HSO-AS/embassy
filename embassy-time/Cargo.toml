@@ -1,6 +1,6 @@
 [package]
 name = "embassy-time"
-version = "0.1.2"
+version = "0.1.5"
 edition = "2021"
 description = "Instant and Duration for embedded no-std systems, with async timer support"
 repository = "https://github.com/embassy-rs/embassy"
@@ -12,6 +12,12 @@ categories = [
     "concurrency",
     "asynchronous",
 ]
+
+# Prevent multiple copies of this crate in the same binary.
+# Needed because different copies might get different tick rates, causing
+# wrong delays if the time driver is using one copy and user code is using another.
+# This is especially common when mixing crates from crates.io and git.
+links = "embassy-time"
 
 [package.metadata.embassy_docs]
 src_base = "https://github.com/embassy-rs/embassy/blob/embassy-time-v$VERSION/embassy-time/src/"
@@ -52,6 +58,9 @@ generic-queue-16 = ["generic-queue"]
 generic-queue-32 = ["generic-queue"]
 generic-queue-64 = ["generic-queue"]
 generic-queue-128 = ["generic-queue"]
+
+# Create a `MockDriver` that can be manually advanced for testing purposes.
+mock-driver = ["tick-hz-1_000_000"]
 
 # Set the `embassy_time` tick rate.
 #
@@ -120,6 +129,25 @@ tick-hz-65_536_000 = []
 tick-hz-131_072_000 = []
 tick-hz-262_144_000 = []
 tick-hz-524_288_000 = []
+tick-hz-20_000 = []
+tick-hz-40_000 = []
+tick-hz-80_000 = []
+tick-hz-160_000 = []
+tick-hz-320_000 = []
+tick-hz-640_000 = []
+tick-hz-1_280_000 = []
+tick-hz-2_560_000 = []
+tick-hz-5_120_000 = []
+tick-hz-10_240_000 = []
+tick-hz-20_480_000 = []
+tick-hz-40_960_000 = []
+tick-hz-81_920_000 = []
+tick-hz-163_840_000 = []
+tick-hz-327_680_000 = []
+tick-hz-655_360_000 = []
+tick-hz-1_310_720_000 = []
+tick-hz-2_621_440_000 = []
+tick-hz-5_242_880_000 = []
 tick-hz-2_000_000 = []
 tick-hz-3_000_000 = []
 tick-hz-4_000_000 = []
@@ -145,6 +173,68 @@ tick-hz-384_000_000 = []
 tick-hz-512_000_000 = []
 tick-hz-576_000_000 = []
 tick-hz-768_000_000 = []
+tick-hz-20_000_000 = []
+tick-hz-30_000_000 = []
+tick-hz-40_000_000 = []
+tick-hz-50_000_000 = []
+tick-hz-60_000_000 = []
+tick-hz-70_000_000 = []
+tick-hz-80_000_000 = []
+tick-hz-90_000_000 = []
+tick-hz-110_000_000 = []
+tick-hz-120_000_000 = []
+tick-hz-130_000_000 = []
+tick-hz-140_000_000 = []
+tick-hz-150_000_000 = []
+tick-hz-160_000_000 = []
+tick-hz-170_000_000 = []
+tick-hz-180_000_000 = []
+tick-hz-190_000_000 = []
+tick-hz-200_000_000 = []
+tick-hz-210_000_000 = []
+tick-hz-220_000_000 = []
+tick-hz-230_000_000 = []
+tick-hz-240_000_000 = []
+tick-hz-250_000_000 = []
+tick-hz-260_000_000 = []
+tick-hz-270_000_000 = []
+tick-hz-280_000_000 = []
+tick-hz-290_000_000 = []
+tick-hz-300_000_000 = []
+tick-hz-320_000_000 = []
+tick-hz-340_000_000 = []
+tick-hz-360_000_000 = []
+tick-hz-380_000_000 = []
+tick-hz-400_000_000 = []
+tick-hz-420_000_000 = []
+tick-hz-440_000_000 = []
+tick-hz-460_000_000 = []
+tick-hz-480_000_000 = []
+tick-hz-500_000_000 = []
+tick-hz-520_000_000 = []
+tick-hz-540_000_000 = []
+tick-hz-560_000_000 = []
+tick-hz-580_000_000 = []
+tick-hz-600_000_000 = []
+tick-hz-620_000_000 = []
+tick-hz-640_000_000 = []
+tick-hz-660_000_000 = []
+tick-hz-680_000_000 = []
+tick-hz-700_000_000 = []
+tick-hz-720_000_000 = []
+tick-hz-740_000_000 = []
+tick-hz-760_000_000 = []
+tick-hz-780_000_000 = []
+tick-hz-800_000_000 = []
+tick-hz-820_000_000 = []
+tick-hz-840_000_000 = []
+tick-hz-860_000_000 = []
+tick-hz-880_000_000 = []
+tick-hz-900_000_000 = []
+tick-hz-920_000_000 = []
+tick-hz-940_000_000 = []
+tick-hz-960_000_000 = []
+tick-hz-980_000_000 = []
 # END TICKS
 
 [dependencies]
@@ -153,14 +243,13 @@ log = { version = "0.4.14", optional = true }
 tracing = { version = "0.1", optional = true, default-features = false, features = ["attributes"] }
 
 embedded-hal-02 = { package = "embedded-hal", version = "0.2.6" }
-embedded-hal-1 = { package = "embedded-hal", version = "=1.0.0-alpha.11", optional = true}
-embedded-hal-async = { version = "=0.2.0-alpha.2", optional = true}
+embedded-hal-1 = { package = "embedded-hal", version = "=1.0.0-rc.1", optional = true}
+embedded-hal-async = { version = "=1.0.0-rc.1", optional = true}
 
 futures-util = { version = "0.3.17", default-features = false }
-atomic-polyfill = "1.0.1"
 critical-section = "1.1"
 cfg-if = "1.0.0"
-heapless = "0.7"
+heapless = "0.8"
 
 # WASM dependencies
 wasm-bindgen = { version = "0.2.81", optional = true }
@@ -170,4 +259,4 @@ wasm-timer = { version = "0.2.5", optional = true }
 [dev-dependencies]
 serial_test = "0.9"
 critical-section = { version = "1.1", features = ["std"] }
-embassy-executor = { version = "0.2.0", path = "../embassy-executor", features = ["nightly"] }
+embassy-executor = { version = "0.3.1", path = "../embassy-executor", features = ["nightly"] }

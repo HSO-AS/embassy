@@ -12,7 +12,7 @@ use embassy_stm32::exti::{Channel, ExtiInput};
 use embassy_stm32::gpio::{Input, Level, Output, Pin, Pull, Speed};
 use embassy_stm32::spi;
 use embassy_stm32::time::khz;
-use embassy_time::{Delay, Duration, Timer};
+use embassy_time::{Delay, Timer};
 use lora_phy::mod_params::*;
 use lora_phy::sx1276_7_8_9::SX1276_7_8_9;
 use lora_phy::LoRa;
@@ -23,21 +23,15 @@ const LORA_FREQUENCY_IN_HZ: u32 = 903_900_000; // warning: set this appropriatel
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
     let mut config = embassy_stm32::Config::default();
-    config.rcc.mux = embassy_stm32::rcc::ClockSrc::HSI16;
-    config.rcc.enable_hsi48 = true;
+    config.rcc.hsi = true;
+    config.rcc.mux = embassy_stm32::rcc::ClockSrc::HSI;
     let p = embassy_stm32::init(config);
 
+    let mut spi_config = spi::Config::default();
+    spi_config.frequency = khz(200);
+
     // SPI for sx1276
-    let spi = spi::Spi::new(
-        p.SPI1,
-        p.PB3,
-        p.PA7,
-        p.PA6,
-        p.DMA1_CH3,
-        p.DMA1_CH2,
-        khz(200),
-        spi::Config::default(),
-    );
+    let spi = spi::Spi::new(p.SPI1, p.PB3, p.PA7, p.PA6, p.DMA1_CH3, p.DMA1_CH2, spi_config);
 
     let nss = Output::new(p.PA15.degrade(), Level::High, Speed::Low);
     let reset = Output::new(p.PC0.degrade(), Level::High, Speed::Low);
@@ -47,10 +41,8 @@ async fn main(_spawner: Spawner) {
 
     let iv = Stm32l0InterfaceVariant::new(nss, reset, irq, None, None).unwrap();
 
-    let mut delay = Delay;
-
     let mut lora = {
-        match LoRa::new(SX1276_7_8_9::new(BoardType::Stm32l0Sx1276, spi, iv), false, &mut delay).await {
+        match LoRa::new(SX1276_7_8_9::new(BoardType::Stm32l0Sx1276, spi, iv), false, Delay).await {
             Ok(l) => l,
             Err(err) => {
                 info!("Radio error = {}", err);
@@ -63,7 +55,7 @@ async fn main(_spawner: Spawner) {
     let mut start_indicator = Output::new(p.PB6, Level::Low, Speed::Low);
 
     start_indicator.set_high();
-    Timer::after(Duration::from_secs(5)).await;
+    Timer::after_secs(5).await;
     start_indicator.set_low();
 
     let mut receiving_buffer = [00u8; 100];
@@ -94,7 +86,7 @@ async fn main(_spawner: Spawner) {
     };
 
     match lora
-        .prepare_for_rx(&mdltn_params, &rx_pkt_params, None, true, false, 0, 0x00ffffffu32)
+        .prepare_for_rx(&mdltn_params, &rx_pkt_params, None, None, false)
         .await
     {
         Ok(()) => {}
@@ -115,7 +107,7 @@ async fn main(_spawner: Spawner) {
                 {
                     info!("rx successful");
                     debug_indicator.set_high();
-                    Timer::after(Duration::from_secs(5)).await;
+                    Timer::after_secs(5).await;
                     debug_indicator.set_low();
                 } else {
                     info!("rx unknown packet");

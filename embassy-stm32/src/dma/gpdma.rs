@@ -5,7 +5,7 @@ use core::pin::Pin;
 use core::sync::atomic::{fence, Ordering};
 use core::task::{Context, Poll};
 
-use embassy_hal_common::{into_ref, Peripheral, PeripheralRef};
+use embassy_hal_internal::{into_ref, Peripheral, PeripheralRef};
 use embassy_sync::waitqueue::AtomicWaker;
 
 use super::word::{Word, WordSize};
@@ -53,10 +53,10 @@ impl State {
 static STATE: State = State::new();
 
 /// safety: must be called only once
-pub(crate) unsafe fn init(irq_priority: Priority) {
+pub(crate) unsafe fn init(cs: critical_section::CriticalSection, irq_priority: Priority) {
     foreach_interrupt! {
         ($peri:ident, gpdma, $block:ident, $signal_name:ident, $irq:ident) => {
-            crate::interrupt::typelevel::$irq::set_priority(irq_priority);
+            crate::interrupt::typelevel::$irq::set_priority_with_cs(cs, irq_priority);
             crate::interrupt::typelevel::$irq::enable();
         };
     }

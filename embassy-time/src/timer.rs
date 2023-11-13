@@ -3,6 +3,7 @@ use core::pin::Pin;
 use core::task::{Context, Poll, Waker};
 
 use futures_util::future::{select, Either};
+use futures_util::stream::FusedStream;
 use futures_util::{pin_mut, Stream};
 
 use crate::{Duration, Instant};
@@ -62,6 +63,42 @@ impl Timer {
             expires_at: Instant::now() + duration,
             yielded_once: false,
         }
+    }
+
+    /// Expire after the specified number of ticks.
+    ///
+    /// This method is a convenience wrapper for calling `Timer::after(Duration::from_ticks())`.
+    /// For more details, refer to [`Timer::after()`] and [`Duration::from_ticks()`].
+    #[inline]
+    pub fn after_ticks(ticks: u64) -> Self {
+        Self::after(Duration::from_ticks(ticks))
+    }
+
+    /// Expire after the specified number of microseconds.
+    ///
+    /// This method is a convenience wrapper for calling `Timer::after(Duration::from_micros())`.
+    /// For more details, refer to [`Timer::after()`] and [`Duration::from_micros()`].
+    #[inline]
+    pub fn after_micros(micros: u64) -> Self {
+        Self::after(Duration::from_micros(micros))
+    }
+
+    /// Expire after the specified number of milliseconds.
+    ///
+    /// This method is a convenience wrapper for calling `Timer::after(Duration::from_millis())`.
+    /// For more details, refer to [`Timer::after`] and [`Duration::from_millis()`].
+    #[inline]
+    pub fn after_millis(millis: u64) -> Self {
+        Self::after(Duration::from_millis(millis))
+    }
+
+    /// Expire after the specified number of seconds.
+    ///
+    /// This method is a convenience wrapper for calling `Timer::after(Duration::from_secs())`.
+    /// For more details, refer to [`Timer::after`] and [`Duration::from_secs()`].
+    #[inline]
+    pub fn after_secs(secs: u64) -> Self {
+        Self::after(Duration::from_secs(secs))
     }
 }
 
@@ -132,7 +169,13 @@ impl Ticker {
         Self { expires_at, duration }
     }
 
-    /// Waits for the next tick
+    /// Resets the ticker back to its original state.
+    /// This causes the ticker to go back to zero, even if the current tick isn't over yet.
+    pub fn reset(&mut self) {
+        self.expires_at = Instant::now() + self.duration;
+    }
+
+    /// Waits for the next tick.
     pub fn next(&mut self) -> impl Future<Output = ()> + '_ {
         poll_fn(|cx| {
             if self.expires_at <= Instant::now() {
@@ -160,6 +203,13 @@ impl Stream for Ticker {
             schedule_wake(self.expires_at, cx.waker());
             Poll::Pending
         }
+    }
+}
+
+impl FusedStream for Ticker {
+    fn is_terminated(&self) -> bool {
+        // `Ticker` keeps yielding values until dropped, it never terminates.
+        false
     }
 }
 

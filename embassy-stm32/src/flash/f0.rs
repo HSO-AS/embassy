@@ -19,8 +19,10 @@ pub(crate) unsafe fn lock() {
 }
 
 pub(crate) unsafe fn unlock() {
-    pac::FLASH.keyr().write(|w| w.set_fkeyr(0x4567_0123));
-    pac::FLASH.keyr().write(|w| w.set_fkeyr(0xCDEF_89AB));
+    if pac::FLASH.cr().read().lock() {
+        pac::FLASH.keyr().write(|w| w.set_fkeyr(0x4567_0123));
+        pac::FLASH.keyr().write(|w| w.set_fkeyr(0xCDEF_89AB));
+    }
 }
 
 pub(crate) unsafe fn enable_blocking_write() {
@@ -76,17 +78,9 @@ pub(crate) unsafe fn blocking_erase_sector(sector: &FlashSector) -> Result<(), E
 }
 
 pub(crate) unsafe fn clear_all_err() {
-    pac::FLASH.sr().modify(|w| {
-        if w.pgerr() {
-            w.set_pgerr(true);
-        }
-        if w.wrprt() {
-            w.set_wrprt(true)
-        };
-        if w.eop() {
-            w.set_eop(true);
-        }
-    });
+    // read and write back the same value.
+    // This clears all "write 0 to clear" bits.
+    pac::FLASH.sr().modify(|_| {});
 }
 
 unsafe fn wait_ready_blocking() -> Result<(), Error> {

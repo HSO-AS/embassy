@@ -15,7 +15,7 @@ use embassy_rp::peripherals::SPI1;
 use embassy_rp::spi::{Async, Config, Spi};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
-use embassy_time::{Delay, Duration, Timer};
+use embassy_time::{Delay, Timer};
 use lora_phy::mod_params::*;
 use lora_phy::sx1261_2::SX1261_2;
 use lora_phy::LoRa;
@@ -59,7 +59,7 @@ async fn core0_task() {
     info!("Hello from core 0");
     loop {
         CHANNEL.send([0x01u8, 0x02u8, 0x03u8]).await;
-        Timer::after(Duration::from_millis(60 * 1000)).await;
+        Timer::after_millis(60 * 1000).await;
     }
 }
 
@@ -69,16 +69,9 @@ async fn core1_task(
     iv: GenericSx126xInterfaceVariant<Output<'static, AnyPin>, Input<'static, AnyPin>>,
 ) {
     info!("Hello from core 1");
-    let mut delay = Delay;
 
     let mut lora = {
-        match LoRa::new(
-            SX1261_2::new(BoardType::RpPicoWaveshareSx1262, spi, iv),
-            false,
-            &mut delay,
-        )
-        .await
-        {
+        match LoRa::new(SX1261_2::new(BoardType::RpPicoWaveshareSx1262, spi, iv), false, Delay).await {
             Ok(l) => l,
             Err(err) => {
                 info!("Radio error = {}", err);
@@ -113,7 +106,7 @@ async fn core1_task(
     };
 
     loop {
-        let buffer: [u8; 3] = CHANNEL.recv().await;
+        let buffer: [u8; 3] = CHANNEL.receive().await;
         match lora.prepare_for_tx(&mdltn_params, 20, false).await {
             Ok(()) => {}
             Err(err) => {
@@ -132,7 +125,7 @@ async fn core1_task(
             }
         };
 
-        match lora.sleep(&mut delay).await {
+        match lora.sleep(false).await {
             Ok(()) => info!("Sleep successful"),
             Err(err) => info!("Sleep unsuccessful = {}", err),
         }

@@ -8,7 +8,7 @@ use embassy_stm32::dma::word::U5;
 use embassy_stm32::dma::NoDma;
 use embassy_stm32::spi::{Config, Spi};
 use embassy_stm32::time::Hertz;
-use embassy_time::{Duration, Timer};
+use embassy_time::Timer;
 use {defmt_rtt as _, panic_probe as _};
 
 const NR_PIXELS: usize = 15;
@@ -76,7 +76,9 @@ async fn main(_spawner: Spawner) {
     let p = embassy_stm32::init(Default::default());
     info!("Start test using spi as neopixel driver");
 
-    let mut spi = Spi::new_txonly_nosck(p.SPI1, p.PB5, p.DMA1_CH3, NoDma, Hertz(4_000_000), Config::default());
+    let mut config = Config::default();
+    config.frequency = Hertz(4_000_000);
+    let mut spi = Spi::new_txonly_nosck(p.SPI1, p.PB5, p.DMA1_CH3, NoDma, config);
 
     let mut neopixels = Ws2812::new();
 
@@ -94,8 +96,8 @@ async fn main(_spawner: Spawner) {
             cnt += 1;
             // start sending the neopixel bit patters over spi to the neopixel string
             spi.write(&neopixels.bitbuffer).await.ok();
-            Timer::after(Duration::from_millis(500)).await;
+            Timer::after_millis(500).await;
         }
-        Timer::after(Duration::from_millis(1000)).await;
+        Timer::after_millis(1000).await;
     }
 }

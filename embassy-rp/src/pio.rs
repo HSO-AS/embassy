@@ -5,13 +5,13 @@ use core::sync::atomic::{compiler_fence, Ordering};
 use core::task::{Context, Poll};
 
 use atomic_polyfill::{AtomicU32, AtomicU8};
-use embassy_hal_common::{into_ref, Peripheral, PeripheralRef};
+use embassy_hal_internal::{into_ref, Peripheral, PeripheralRef};
 use embassy_sync::waitqueue::AtomicWaker;
 use fixed::types::extra::U8;
 use fixed::FixedU32;
 use pac::io::vals::Gpio0ctrlFuncsel;
 use pac::pio::vals::SmExecctrlStatusSel;
-use pio::{SideSet, Wrap};
+use pio::{Program, SideSet, Wrap};
 
 use crate::dma::{Channel, Transfer, Word};
 use crate::gpio::sealed::Pin as SealedPin;
@@ -734,23 +734,67 @@ pub struct InstanceMemory<'d, PIO: Instance> {
 
 pub struct LoadedProgram<'d, PIO: Instance> {
     pub used_memory: InstanceMemory<'d, PIO>,
-    origin: u8,
-    wrap: Wrap,
-    side_set: SideSet,
+    pub origin: u8,
+    pub wrap: Wrap,
+    pub side_set: SideSet,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum LoadError {
+    /// Insufficient consecutive free instruction space to load program.
+    InsufficientSpace,
+    /// Loading the program would overwrite an instruction address already
+    /// used by another program.
+    AddressInUse(usize),
 }
 
 impl<'d, PIO: Instance> Common<'d, PIO> {
-    pub fn load_program<const SIZE: usize>(&mut self, prog: &RelocatedProgram<SIZE>) -> LoadedProgram<'d, PIO> {
+    /// Load a PIO program. This will automatically relocate the program to
+    /// an available chunk of free instruction memory if the program origin
+    /// was not explicitly specified, otherwise it will attempt to load the
+    /// program only at its origin.
+    pub fn load_program<const SIZE: usize>(&mut self, prog: &Program<SIZE>) -> LoadedProgram<'d, PIO> {
         match self.try_load_program(prog) {
             Ok(r) => r,
-            Err(at) => panic!("Trying to write already used PIO instruction memory at {}", at),
+            Err(e) => panic!("Failed to load PIO program: {:?}", e),
         }
     }
 
+    /// Load a PIO program. This will automatically relocate the program to
+    /// an available chunk of free instruction memory if the program origin
+    /// was not explicitly specified, otherwise it will attempt to load the
+    /// program only at its origin.
     pub fn try_load_program<const SIZE: usize>(
         &mut self,
-        prog: &RelocatedProgram<SIZE>,
+        prog: &Program<SIZE>,
+    ) -> Result<LoadedProgram<'d, PIO>, LoadError> {
+        match prog.origin {
+            Some(origin) => self
+                .try_load_program_at(prog, origin)
+                .map_err(|a| LoadError::AddressInUse(a)),
+            None => {
+                // naively search for free space, allowing wraparound since
+                // PIO does support that. with only 32 instruction slots it
+                // doesn't make much sense to do anything more fancy.
+                let mut origin = 0;
+                while origin < 32 {
+                    match self.try_load_program_at(prog, origin as _) {
+                        Ok(r) => return Ok(r),
+                        Err(a) => origin = a + 1,
+                    }
+                }
+                Err(LoadError::InsufficientSpace)
+            }
+        }
+    }
+
+    fn try_load_program_at<const SIZE: usize>(
+        &mut self,
+        prog: &Program<SIZE>,
+        origin: u8,
     ) -> Result<LoadedProgram<'d, PIO>, usize> {
+        let prog = RelocatedProgram::new_with_origin(prog, origin);
         let used_memory = self.try_write_instr(prog.origin() as _, prog.code())?;
         Ok(LoadedProgram {
             used_memory,
@@ -760,7 +804,7 @@ impl<'d, PIO: Instance> Common<'d, PIO> {
         })
     }
 
-    pub fn try_write_instr<I>(&mut self, start: usize, instrs: I) -> Result<InstanceMemory<'d, PIO>, usize>
+    fn try_write_instr<I>(&mut self, start: usize, instrs: I) -> Result<InstanceMemory<'d, PIO>, usize>
     where
         I: Iterator<Item = u16>,
     {
@@ -808,7 +852,7 @@ impl<'d, PIO: Instance> Common<'d, PIO> {
     /// of [`Pio`] do not keep pin registrations alive.**
     pub fn make_pio_pin(&mut self, pin: impl Peripheral<P = impl PioPin + 'd> + 'd) -> Pin<'d, PIO> {
         into_ref!(pin);
-        pin.io().ctrl().write(|w| w.set_funcsel(PIO::FUNCSEL as _));
+        pin.gpio().ctrl().write(|w| w.set_funcsel(PIO::FUNCSEL as _));
         // we can be relaxed about this because we're &mut here and nothing is cached
         PIO::state().used_pins.fetch_or(1 << pin.pin_bank(), Ordering::Relaxed);
         Pin {
@@ -1035,18 +1079,43 @@ impl_pio!(PIO1, 1, PIO1, PIO1_0, PIO1_IRQ_0);
 pub trait PioPin: sealed::PioPin + gpio::Pin {}
 
 macro_rules! impl_pio_pin {
-    ($( $num:tt )*) => {
+    ($( $pin:ident, )*) => {
         $(
-            paste::paste!{
-                impl sealed::PioPin for peripherals::[< PIN_ $num >] {}
-                impl PioPin for peripherals::[< PIN_ $num >] {}
-            }
+            impl sealed::PioPin for peripherals::$pin {}
+            impl PioPin for peripherals::$pin {}
         )*
     };
 }
 
 impl_pio_pin! {
-    0 1 2 3 4 5 6 7 8 9
-    10 11 12 13 14 15 16 17 18 19
-    20 21 22 23 24 25 26 27 28 29
+    PIN_0,
+    PIN_1,
+    PIN_2,
+    PIN_3,
+    PIN_4,
+    PIN_5,
+    PIN_6,
+    PIN_7,
+    PIN_8,
+    PIN_9,
+    PIN_10,
+    PIN_11,
+    PIN_12,
+    PIN_13,
+    PIN_14,
+    PIN_15,
+    PIN_16,
+    PIN_17,
+    PIN_18,
+    PIN_19,
+    PIN_20,
+    PIN_21,
+    PIN_22,
+    PIN_23,
+    PIN_24,
+    PIN_25,
+    PIN_26,
+    PIN_27,
+    PIN_28,
+    PIN_29,
 }

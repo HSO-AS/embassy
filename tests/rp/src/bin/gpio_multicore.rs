@@ -1,17 +1,16 @@
 #![no_std]
 #![no_main]
 #![feature(type_alias_impl_trait)]
-#[path = "../common.rs"]
-mod common;
+teleprobe_meta::target!(b"rpi-pico");
 
 use defmt::{info, unwrap};
 use embassy_executor::Executor;
-use embassy_executor::_export::StaticCell;
 use embassy_rp::gpio::{Input, Level, Output, Pull};
 use embassy_rp::multicore::{spawn_core1, Stack};
 use embassy_rp::peripherals::{PIN_0, PIN_1};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
+use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
 static mut CORE1_STACK: Stack<1024> = Stack::new();
@@ -38,11 +37,11 @@ async fn core0_task(p: PIN_0) {
     let mut pin = Output::new(p, Level::Low);
 
     CHANNEL0.send(()).await;
-    CHANNEL1.recv().await;
+    CHANNEL1.receive().await;
 
     pin.set_high();
 
-    CHANNEL1.recv().await;
+    CHANNEL1.receive().await;
 
     info!("Test OK");
     cortex_m::asm::bkpt();
@@ -52,7 +51,7 @@ async fn core0_task(p: PIN_0) {
 async fn core1_task(p: PIN_1) {
     info!("CORE1 is running");
 
-    CHANNEL0.recv().await;
+    CHANNEL0.receive().await;
 
     let mut pin = Input::new(p, Pull::Down);
     let wait = pin.wait_for_rising_edge();

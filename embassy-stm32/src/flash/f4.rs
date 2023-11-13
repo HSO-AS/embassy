@@ -14,7 +14,7 @@ use crate::pac;
 mod alt_regions {
     use core::marker::PhantomData;
 
-    use embassy_hal_common::PeripheralRef;
+    use embassy_hal_internal::PeripheralRef;
     use stm32_metapac::FLASH_SIZE;
 
     use crate::_generated::flash_regions::{OTPRegion, BANK1_REGION1, BANK1_REGION2, BANK1_REGION3, OTP_REGION};
@@ -228,8 +228,10 @@ pub(crate) unsafe fn lock() {
 }
 
 pub(crate) unsafe fn unlock() {
-    pac::FLASH.keyr().write(|w| w.set_key(0x45670123));
-    pac::FLASH.keyr().write(|w| w.set_key(0xCDEF89AB));
+    if pac::FLASH.cr().read().lock() {
+        pac::FLASH.keyr().write(|w| w.set_key(0x45670123));
+        pac::FLASH.keyr().write(|w| w.set_key(0xCDEF89AB));
+    }
 }
 
 pub(crate) unsafe fn enable_write() {
@@ -336,12 +338,9 @@ pub(crate) unsafe fn blocking_erase_sector(sector: &FlashSector) -> Result<(), E
 }
 
 pub(crate) fn clear_all_err() {
-    pac::FLASH.sr().write(|w| {
-        w.set_pgserr(true);
-        w.set_pgperr(true);
-        w.set_pgaerr(true);
-        w.set_wrperr(true);
-    });
+    // read and write back the same value.
+    // This clears all "write 0 to clear" bits.
+    pac::FLASH.sr().modify(|_| {});
 }
 
 pub(crate) async fn wait_ready() -> Result<(), Error> {
@@ -466,7 +465,7 @@ pub(crate) fn assert_not_corrupted_read(end_address: u32) {
         feature = "stm32f439vg",
         feature = "stm32f439zg",
     ))]
-    if second_bank_read && unsafe { pac::DBGMCU.idcode().read().rev_id() < REVISION_3 && !pa12_is_output_pull_low() } {
+    if second_bank_read && pac::DBGMCU.idcode().read().rev_id() < REVISION_3 && !pa12_is_output_pull_low() {
         panic!("Read corruption for stm32f42xxG and stm32f43xxG in dual bank mode when PA12 is in use for chips below revision 3, see errata 2.2.11");
     }
 }

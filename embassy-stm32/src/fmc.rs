@@ -1,6 +1,6 @@
 use core::marker::PhantomData;
 
-use embassy_hal_common::into_ref;
+use embassy_hal_internal::into_ref;
 
 use crate::gpio::sealed::AFType;
 use crate::gpio::{Pull, Speed};
@@ -12,6 +12,37 @@ pub struct Fmc<'d, T: Instance> {
 
 unsafe impl<'d, T> Send for Fmc<'d, T> where T: Instance {}
 
+impl<'d, T> Fmc<'d, T>
+where
+    T: Instance,
+{
+    /// Create a raw FMC instance.
+    ///
+    /// **Note:** This is currently used to provide access to some basic FMC functions
+    /// for manual configuration for memory types that stm32-fmc does not support.
+    pub fn new_raw(_instance: impl Peripheral<P = T> + 'd) -> Self {
+        Self { peri: PhantomData }
+    }
+
+    /// Enable the FMC peripheral and reset it.
+    pub fn enable(&mut self) {
+        T::enable_and_reset();
+    }
+
+    /// Enable the memory controller on applicable chips.
+    pub fn memory_controller_enable(&mut self) {
+        // fmc v1 and v2 does not have the fmcen bit
+        // fsmc v1, v2 and v3 does not have the fmcen bit
+        // This is a "not" because it is expected that all future versions have this bit
+        #[cfg(not(any(fmc_v1x3, fmc_v2x1, fsmc_v1x0, fsmc_v1x3, fsmc_v2x3, fsmc_v3x1)))]
+        T::REGS.bcr1().modify(|r| r.set_fmcen(true));
+    }
+
+    pub fn source_clock_hz(&self) -> u32 {
+        <T as crate::rcc::sealed::RccPeripheral>::frequency().0
+    }
+}
+
 unsafe impl<'d, T> stm32_fmc::FmcPeripheral for Fmc<'d, T>
 where
     T: Instance,
@@ -19,8 +50,7 @@ where
     const REGISTERS: *const () = T::REGS.as_ptr() as *const _;
 
     fn enable(&mut self) {
-        <T as crate::rcc::sealed::RccPeripheral>::enable();
-        <T as crate::rcc::sealed::RccPeripheral>::reset();
+        T::enable_and_reset();
     }
 
     fn memory_controller_enable(&mut self) {

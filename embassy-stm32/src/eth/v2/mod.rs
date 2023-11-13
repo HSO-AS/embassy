@@ -3,7 +3,7 @@ mod descriptors;
 use core::marker::PhantomData;
 use core::sync::atomic::{fence, Ordering};
 
-use embassy_hal_common::{into_ref, PeripheralRef};
+use embassy_hal_internal::{into_ref, PeripheralRef};
 
 pub(crate) use self::descriptors::{RDes, RDesRing, TDes, TDesRing};
 use super::*;
@@ -33,8 +33,6 @@ impl interrupt::typelevel::Handler<interrupt::typelevel::ETH> for InterruptHandl
         dma.dmacsr().read();
     }
 }
-
-const MTU: usize = 1514; // 14 Ethernet header + 1500 IP packet
 
 pub struct Ethernet<'d, T: Instance, P: PHY> {
     _peri: PeripheralRef<'d, T>,
@@ -73,14 +71,12 @@ impl<'d, T: Instance, P: PHY> Ethernet<'d, T, P> {
         tx_en: impl Peripheral<P = impl TXEnPin<T>> + 'd,
         phy: P,
         mac_addr: [u8; 6],
-        phy_addr: u8,
     ) -> Self {
         into_ref!(peri, ref_clk, mdio, mdc, crs, rx_d0, rx_d1, tx_d0, tx_d1, tx_en);
 
         // Enable the necessary Clocks
         #[cfg(not(rcc_h5))]
         critical_section::with(|_| {
-            crate::pac::RCC.apb4enr().modify(|w| w.set_syscfgen(true));
             crate::pac::RCC.ahb1enr().modify(|w| {
                 w.set_eth1macen(true);
                 w.set_eth1txen(true);
@@ -102,9 +98,9 @@ impl<'d, T: Instance, P: PHY> Ethernet<'d, T, P> {
             });
 
             // RMII
-            crate::pac::SBS
+            crate::pac::SYSCFG
                 .pmcr()
-                .modify(|w| w.set_eth_sel_phy(crate::pac::sbs::vals::EthSelPhy::B_0X4));
+                .modify(|w| w.set_eth_sel_phy(crate::pac::syscfg::vals::EthSelPhy::B_0X4));
         });
 
         config_pins!(ref_clk, mdio, mdc, crs, rx_d0, rx_d1, tx_d0, tx_d1, tx_en);
@@ -164,11 +160,11 @@ impl<'d, T: Instance, P: PHY> Ethernet<'d, T, P> {
         dma.dmactx_cr().modify(|w| w.set_txpbl(1)); // 32 ?
         dma.dmacrx_cr().modify(|w| {
             w.set_rxpbl(1); // 32 ?
-            w.set_rbsz(MTU as u16);
+            w.set_rbsz(RX_BUFFER_SIZE as u16);
         });
 
         // NOTE(unsafe) We got the peripheral singleton, which means that `rcc::init` was called
-        let hclk = unsafe { crate::rcc::get_freqs() }.ahb1;
+        let hclk = unsafe { crate::rcc::get_freqs() }.hclk1;
         let hclk_mhz = hclk.0 / 1_000_000;
 
         // Set the MDC clock frequency in the range 1MHz - 2.5MHz
@@ -205,7 +201,6 @@ impl<'d, T: Instance, P: PHY> Ethernet<'d, T, P> {
             station_management: EthernetStationManagement {
                 peri: PhantomData,
                 clock_range: clock_range,
-                phy_addr: phy_addr,
             },
             mac_addr,
         };
@@ -245,15 +240,14 @@ impl<'d, T: Instance, P: PHY> Ethernet<'d, T, P> {
 pub struct EthernetStationManagement<T: Instance> {
     peri: PhantomData<T>,
     clock_range: u8,
-    phy_addr: u8,
 }
 
 unsafe impl<T: Instance> StationManagement for EthernetStationManagement<T> {
-    fn smi_read(&mut self, reg: u8) -> u16 {
+    fn smi_read(&mut self, phy_addr: u8, reg: u8) -> u16 {
         let mac = ETH.ethernet_mac();
 
         mac.macmdioar().modify(|w| {
-            w.set_pa(self.phy_addr);
+            w.set_pa(phy_addr);
             w.set_rda(reg);
             w.set_goc(0b11); // read
             w.set_cr(self.clock_range);
@@ -263,12 +257,12 @@ unsafe impl<T: Instance> StationManagement for EthernetStationManagement<T> {
         mac.macmdiodr().read().md()
     }
 
-    fn smi_write(&mut self, reg: u8, val: u16) {
+    fn smi_write(&mut self, phy_addr: u8, reg: u8, val: u16) {
         let mac = ETH.ethernet_mac();
 
         mac.macmdiodr().write(|w| w.set_md(val));
         mac.macmdioar().modify(|w| {
-            w.set_pa(self.phy_addr);
+            w.set_pa(phy_addr);
             w.set_rda(reg);
             w.set_goc(0b01); // write
             w.set_cr(self.clock_range);

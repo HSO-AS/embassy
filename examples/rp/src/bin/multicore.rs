@@ -13,7 +13,7 @@ use embassy_rp::multicore::{spawn_core1, Stack};
 use embassy_rp::peripherals::PIN_25;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
-use embassy_time::{Duration, Timer};
+use embassy_time::Timer;
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
@@ -46,9 +46,9 @@ async fn core0_task() {
     info!("Hello from core 0");
     loop {
         CHANNEL.send(LedState::On).await;
-        Timer::after(Duration::from_millis(100)).await;
+        Timer::after_millis(100).await;
         CHANNEL.send(LedState::Off).await;
-        Timer::after(Duration::from_millis(400)).await;
+        Timer::after_millis(400).await;
     }
 }
 
@@ -56,7 +56,7 @@ async fn core0_task() {
 async fn core1_task(mut led: Output<'static, PIN_25>) {
     info!("Hello from core 1");
     loop {
-        match CHANNEL.recv().await {
+        match CHANNEL.receive().await {
             LedState::On => led.set_high(),
             LedState::Off => led.set_low(),
         }

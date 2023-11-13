@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
-#![allow(incomplete_features)]
 #![feature(async_fn_in_trait, type_alias_impl_trait, concat_bytes)]
+#![allow(stable_features, unknown_lints, async_fn_in_trait)]
 #![deny(unused_must_use)]
 
 // This mod MUST go first, so that the others see its macros.
@@ -27,7 +27,7 @@ use ioctl::IoctlState;
 
 use crate::bus::Bus;
 pub use crate::bus::SpiBusCyw43;
-pub use crate::control::{Control, Error as ControlError};
+pub use crate::control::{Control, Error as ControlError, Scanner};
 pub use crate::runner::Runner;
 pub use crate::structs::BssInfo;
 
@@ -216,7 +216,7 @@ where
     PWR: OutputPin,
     SPI: SpiBusCyw43,
 {
-    let (ch_runner, device) = ch::new(&mut state.ch, [0; 6]);
+    let (ch_runner, device) = ch::new(&mut state.ch, ch::driver::HardwareAddress::Ethernet([0; 6]));
     let state_ch = ch_runner.state_runner();
 
     let mut runner = Runner::new(ch_runner, Bus::new(pwr, spi), &state.ioctl_state, &state.events);

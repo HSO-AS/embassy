@@ -9,17 +9,21 @@ use embassy_net::{Ipv4Address, Stack, StackResources};
 use embassy_stm32::eth::generic_smi::GenericSMI;
 use embassy_stm32::eth::{Ethernet, PacketQueue};
 use embassy_stm32::peripherals::ETH;
-use embassy_stm32::rcc::{AHBPrescaler, APBPrescaler, Hse, HseMode, Pll, PllSource, Sysclk, VoltageScale};
+use embassy_stm32::rcc::{
+    AHBPrescaler, APBPrescaler, Hse, HseMode, Pll, PllDiv, PllMul, PllPreDiv, PllSource, Sysclk, VoltageScale,
+};
 use embassy_stm32::rng::Rng;
 use embassy_stm32::time::Hertz;
-use embassy_stm32::{bind_interrupts, eth, Config};
-use embassy_time::{Duration, Timer};
-use embedded_io::asynch::Write;
+use embassy_stm32::{bind_interrupts, eth, peripherals, rng, Config};
+use embassy_time::Timer;
+use embedded_io_async::Write;
 use rand_core::RngCore;
 use static_cell::make_static;
 use {defmt_rtt as _, panic_probe as _};
+
 bind_interrupts!(struct Irqs {
     ETH => eth::InterruptHandler;
+    RNG => rng::InterruptHandler<peripherals::RNG>;
 });
 
 type Device = Ethernet<'static, ETH, GenericSMI>;
@@ -33,30 +37,30 @@ async fn net_task(stack: &'static Stack<Device>) -> ! {
 async fn main(spawner: Spawner) -> ! {
     let mut config = Config::default();
     config.rcc.hsi = None;
-    config.rcc.hsi48 = true; // needed for rng
+    config.rcc.hsi48 = Some(Default::default()); // needed for RNG
     config.rcc.hse = Some(Hse {
         freq: Hertz(8_000_000),
         mode: HseMode::BypassDigital,
     });
     config.rcc.pll1 = Some(Pll {
-        source: PllSource::Hse,
-        prediv: 2,
-        mul: 125,
-        divp: Some(2),
-        divq: Some(2),
+        source: PllSource::HSE,
+        prediv: PllPreDiv::DIV2,
+        mul: PllMul::MUL125,
+        divp: Some(PllDiv::DIV2),
+        divq: Some(PllDiv::DIV2),
         divr: None,
     });
-    config.rcc.ahb_pre = AHBPrescaler::NotDivided;
-    config.rcc.apb1_pre = APBPrescaler::NotDivided;
-    config.rcc.apb2_pre = APBPrescaler::NotDivided;
-    config.rcc.apb3_pre = APBPrescaler::NotDivided;
-    config.rcc.sys = Sysclk::Pll1P;
+    config.rcc.ahb_pre = AHBPrescaler::DIV1;
+    config.rcc.apb1_pre = APBPrescaler::DIV1;
+    config.rcc.apb2_pre = APBPrescaler::DIV1;
+    config.rcc.apb3_pre = APBPrescaler::DIV1;
+    config.rcc.sys = Sysclk::PLL1_P;
     config.rcc.voltage_scale = VoltageScale::Scale0;
     let p = embassy_stm32::init(config);
     info!("Hello World!");
 
     // Generate random seed.
-    let mut rng = Rng::new(p.RNG);
+    let mut rng = Rng::new(p.RNG, Irqs);
     let mut seed = [0; 8];
     rng.fill_bytes(&mut seed);
     let seed = u64::from_le_bytes(seed);
@@ -76,9 +80,8 @@ async fn main(spawner: Spawner) -> ! {
         p.PG13,
         p.PB15,
         p.PG11,
-        GenericSMI::new(),
+        GenericSMI::new(0),
         mac_addr,
-        0,
     );
 
     let config = embassy_net::Config::dhcpv4(Default::default());
@@ -99,6 +102,9 @@ async fn main(spawner: Spawner) -> ! {
     // Launch network task
     unwrap!(spawner.spawn(net_task(&stack)));
 
+    // Ensure DHCP configuration is up before trying connect
+    stack.wait_config_up().await;
+
     info!("Network task initialized");
 
     // Then we can use it!
@@ -115,7 +121,7 @@ async fn main(spawner: Spawner) -> ! {
         let r = socket.connect(remote_endpoint).await;
         if let Err(e) = r {
             info!("connect error: {:?}", e);
-            Timer::after(Duration::from_secs(3)).await;
+            Timer::after_secs(3).await;
             continue;
         }
         info!("connected!");
@@ -123,9 +129,9 @@ async fn main(spawner: Spawner) -> ! {
             let r = socket.write_all(b"Hello\n").await;
             if let Err(e) = r {
                 info!("write error: {:?}", e);
-                continue;
+                break;
             }
-            Timer::after(Duration::from_secs(1)).await;
+            Timer::after_secs(1).await;
         }
     }
 }

@@ -5,6 +5,7 @@ use core::task::Poll;
 use self::sealed::Instance;
 use crate::interrupt;
 use crate::interrupt::typelevel::Interrupt;
+use crate::pac::rcc::vals::{Lptim1sel, Lptim2sel};
 use crate::peripherals::IPCC;
 use crate::rcc::sealed::RccPeripheral;
 
@@ -93,8 +94,7 @@ pub struct Ipcc;
 
 impl Ipcc {
     pub fn enable(_config: Config) {
-        IPCC::enable();
-        IPCC::reset();
+        IPCC::enable_and_reset();
         IPCC::set_cpu2(true);
 
         _configure_pwr();
@@ -265,62 +265,8 @@ pub(crate) mod sealed {
 }
 
 fn _configure_pwr() {
-    // TODO: move this to RCC
-
-    let pwr = crate::pac::PWR;
+    // TODO: move the rest of this to rcc
     let rcc = crate::pac::RCC;
-
-    rcc.cfgr().modify(|w| w.set_stopwuck(true));
-
-    pwr.cr1().modify(|w| w.set_dbp(true));
-    pwr.cr1().modify(|w| w.set_dbp(true));
-
-    // configure LSE
-    rcc.bdcr().modify(|w| w.set_lseon(true));
-
-    // select system clock source = PLL
-    // set PLL coefficients
-    // m: 2,
-    // n: 12,
-    // r: 3,
-    // q: 4,
-    // p: 3,
-    let src_bits = 0b11;
-    let pllp = (3 - 1) & 0b11111;
-    let pllq = (4 - 1) & 0b111;
-    let pllr = (3 - 1) & 0b111;
-    let plln = 12 & 0b1111111;
-    let pllm = (2 - 1) & 0b111;
-    rcc.pllcfgr().modify(|w| {
-        w.set_pllsrc(src_bits);
-        w.set_pllm(pllm);
-        w.set_plln(plln);
-        w.set_pllr(pllr);
-        w.set_pllp(pllp);
-        w.set_pllpen(true);
-        w.set_pllq(pllq);
-        w.set_pllqen(true);
-    });
-    // enable PLL
-    rcc.cr().modify(|w| w.set_pllon(true));
-    rcc.cr().write(|w| w.set_hsion(false));
-    // while !rcc.cr().read().pllrdy() {}
-
-    // configure SYSCLK mux to use PLL clocl
-    rcc.cfgr().modify(|w| w.set_sw(0b11));
-
-    // configure CPU1 & CPU2 dividers
-    rcc.cfgr().modify(|w| w.set_hpre(0)); // not divided
-    rcc.extcfgr().modify(|w| {
-        w.set_c2hpre(0b1000); // div2
-        w.set_shdhpre(0); // not divided
-    });
-
-    // apply APB1 / APB2 values
-    rcc.cfgr().modify(|w| {
-        w.set_ppre1(0b000); // not divided
-        w.set_ppre2(0b000); // not divided
-    });
 
     // TODO: required
     // set RF wake-up clock = LSE
@@ -328,7 +274,7 @@ fn _configure_pwr() {
 
     // set LPTIM1 & LPTIM2 clock source
     rcc.ccipr().modify(|w| {
-        w.set_lptim1sel(0b00); // PCLK
-        w.set_lptim2sel(0b00); // PCLK
+        w.set_lptim1sel(Lptim1sel::PCLK1);
+        w.set_lptim2sel(Lptim2sel::PCLK1);
     });
 }

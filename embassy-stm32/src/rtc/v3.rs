@@ -1,65 +1,25 @@
 use stm32_metapac::rtc::vals::{Calp, Calw16, Calw8, Fmt, Init, Key, Osel, Pol, TampalrmPu, TampalrmType};
 
-use super::{sealed, Instance, RtcCalibrationCyclePeriod, RtcConfig};
+use super::{sealed, RtcCalibrationCyclePeriod};
 use crate::pac::rtc::Rtc;
+use crate::peripherals::RTC;
+use crate::rtc::sealed::Instance;
 
-impl<'d, T: Instance> super::Rtc<'d, T> {
+impl super::Rtc {
     /// Applies the RTC config
     /// It this changes the RTC clock source the time will be reset
-    pub(super) fn apply_config(&mut self, rtc_config: RtcConfig) {
-        // Unlock the backup domain
-        #[cfg(not(any(rtc_v3u5, rcc_wl5, rcc_wle)))]
-        {
-            crate::pac::PWR.cr1().modify(|w| w.set_dbp(true));
-            while !crate::pac::PWR.cr1().read().dbp() {}
-        }
-        #[cfg(any(rcc_wl5, rcc_wle))]
-        {
-            use crate::pac::pwr::vals::Dbp;
-
-            crate::pac::PWR.cr1().modify(|w| w.set_dbp(Dbp::ENABLED));
-            while crate::pac::PWR.cr1().read().dbp() != Dbp::ENABLED {}
-        }
-
-        let reg = crate::pac::RCC.bdcr().read();
-        assert!(!reg.lsecsson(), "RTC is not compatible with LSE CSS, yet.");
-
-        let config_rtcsel = rtc_config.clock_config as u8;
-        #[cfg(not(any(rcc_wl5, rcc_wle)))]
-        let config_rtcsel = crate::pac::rcc::vals::Rtcsel::from_bits(config_rtcsel);
-
-        if !reg.rtcen() || reg.rtcsel() != config_rtcsel {
-            crate::pac::RCC.bdcr().modify(|w| w.set_bdrst(true));
-
-            crate::pac::RCC.bdcr().modify(|w| {
-                // Reset
-                w.set_bdrst(false);
-
-                // Select RTC source
-                w.set_rtcsel(config_rtcsel);
-
-                w.set_rtcen(true);
-
-                // Restore bcdr
-                w.set_lscosel(reg.lscosel());
-                w.set_lscoen(reg.lscoen());
-
-                w.set_lseon(reg.lseon());
-                w.set_lsedrv(reg.lsedrv());
-                w.set_lsebyp(reg.lsebyp());
-            });
-        }
-
+    pub(super) fn configure(&mut self, async_psc: u8, sync_psc: u16) {
         self.write(true, |rtc| {
             rtc.cr().modify(|w| {
+                w.set_bypshad(true);
                 w.set_fmt(Fmt::TWENTYFOURHOUR);
                 w.set_osel(Osel::DISABLED);
                 w.set_pol(Pol::HIGH);
             });
 
             rtc.prer().modify(|w| {
-                w.set_prediv_s(rtc_config.sync_prescaler);
-                w.set_prediv_a(rtc_config.async_prescaler);
+                w.set_prediv_s(sync_psc);
+                w.set_prediv_a(async_psc);
             });
 
             // TODO: configuration for output pins
@@ -69,8 +29,6 @@ impl<'d, T: Instance> super::Rtc<'d, T> {
                 w.set_tampalrm_pu(TampalrmPu::NOPULLUP);
             });
         });
-
-        self.rtc_config = rtc_config;
     }
 
     const RTC_CALR_MIN_PPM: f32 = -487.1;
@@ -137,11 +95,11 @@ impl<'d, T: Instance> super::Rtc<'d, T> {
         })
     }
 
-    pub(super) fn write<F, R>(&mut self, init_mode: bool, f: F) -> R
+    pub(super) fn write<F, R>(&self, init_mode: bool, f: F) -> R
     where
         F: FnOnce(&crate::pac::rtc::Rtc) -> R,
     {
-        let r = T::regs();
+        let r = RTC::regs();
         // Disable write protection.
         // This is safe, as we're only writin the correct and expected values.
         r.wpr().write(|w| w.set_key(Key::DEACTIVATE1));
@@ -171,6 +129,12 @@ impl<'d, T: Instance> super::Rtc<'d, T> {
 impl sealed::Instance for crate::peripherals::RTC {
     const BACKUP_REGISTER_COUNT: usize = 32;
 
+    #[cfg(all(feature = "low-power", stm32g4))]
+    const EXTI_WAKEUP_LINE: usize = 20;
+
+    #[cfg(all(feature = "low-power", stm32g4))]
+    type WakeupInterrupt = crate::interrupt::typelevel::RTC_WKUP;
+
     fn read_backup_register(_rtc: &Rtc, register: usize) -> Option<u32> {
         #[allow(clippy::if_same_then_else)]
         if register < Self::BACKUP_REGISTER_COUNT {
@@ -188,5 +152,3 @@ impl sealed::Instance for crate::peripherals::RTC {
         }
     }
 }
-
-impl Instance for crate::peripherals::RTC {}

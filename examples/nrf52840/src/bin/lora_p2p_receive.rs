@@ -11,7 +11,7 @@ use embassy_executor::Spawner;
 use embassy_lora::iv::GenericSx126xInterfaceVariant;
 use embassy_nrf::gpio::{Input, Level, Output, OutputDrive, Pin as _, Pull};
 use embassy_nrf::{bind_interrupts, peripherals, spim};
-use embassy_time::{Delay, Duration, Timer};
+use embassy_time::{Delay, Timer};
 use lora_phy::mod_params::*;
 use lora_phy::sx1261_2::SX1261_2;
 use lora_phy::LoRa;
@@ -41,10 +41,8 @@ async fn main(_spawner: Spawner) {
     let iv =
         GenericSx126xInterfaceVariant::new(nss, reset, dio1, busy, Some(rf_switch_rx), Some(rf_switch_tx)).unwrap();
 
-    let mut delay = Delay;
-
     let mut lora = {
-        match LoRa::new(SX1261_2::new(BoardType::Rak4631Sx1262, spim, iv), false, &mut delay).await {
+        match LoRa::new(SX1261_2::new(BoardType::Rak4631Sx1262, spim, iv), false, Delay).await {
             Ok(l) => l,
             Err(err) => {
                 info!("Radio error = {}", err);
@@ -57,7 +55,7 @@ async fn main(_spawner: Spawner) {
     let mut start_indicator = Output::new(p.P1_04, Level::Low, OutputDrive::Standard);
 
     start_indicator.set_high();
-    Timer::after(Duration::from_secs(5)).await;
+    Timer::after_secs(5).await;
     start_indicator.set_low();
 
     let mut receiving_buffer = [00u8; 100];
@@ -88,7 +86,7 @@ async fn main(_spawner: Spawner) {
     };
 
     match lora
-        .prepare_for_rx(&mdltn_params, &rx_pkt_params, None, true, false, 0, 0x00ffffffu32)
+        .prepare_for_rx(&mdltn_params, &rx_pkt_params, None, None, false)
         .await
     {
         Ok(()) => {}
@@ -109,7 +107,7 @@ async fn main(_spawner: Spawner) {
                 {
                     info!("rx successful");
                     debug_indicator.set_high();
-                    Timer::after(Duration::from_secs(5)).await;
+                    Timer::after_secs(5).await;
                     debug_indicator.set_low();
                 } else {
                     info!("rx unknown packet");

@@ -1,7 +1,7 @@
 use core::marker::PhantomData;
 
 use embassy_embedded_hal::SetConfig;
-use embassy_hal_common::{into_ref, PeripheralRef};
+use embassy_hal_internal::{into_ref, PeripheralRef};
 
 use crate::dma::NoDma;
 use crate::gpio::sealed::AFType;
@@ -21,19 +21,10 @@ impl<T: Instance> interrupt::typelevel::Handler<T::Interrupt> for InterruptHandl
 }
 
 #[non_exhaustive]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Default)]
 pub struct Config {
     pub sda_pullup: bool,
     pub scl_pullup: bool,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            sda_pullup: false,
-            scl_pullup: false,
-        }
-    }
 }
 
 pub struct State {}
@@ -65,8 +56,7 @@ impl<'d, T: Instance, TXDMA, RXDMA> I2c<'d, T, TXDMA, RXDMA> {
     ) -> Self {
         into_ref!(scl, sda, tx_dma, rx_dma);
 
-        T::enable();
-        T::reset();
+        T::enable_and_reset();
 
         scl.set_as_af_pull(
             scl.af_num(),
@@ -90,7 +80,7 @@ impl<'d, T: Instance, TXDMA, RXDMA> I2c<'d, T, TXDMA, RXDMA> {
             //reg.set_anfoff(false);
         });
 
-        let timings = Timings::new(T::frequency(), freq.into());
+        let timings = Timings::new(T::frequency(), freq);
 
         T::regs().cr2().modify(|reg| {
             reg.set_freq(timings.freq);
@@ -348,6 +338,12 @@ impl<'d, T: Instance, TXDMA, RXDMA> I2c<'d, T, TXDMA, RXDMA> {
     }
 }
 
+impl<'d, T: Instance, TXDMA, RXDMA> Drop for I2c<'d, T, TXDMA, RXDMA> {
+    fn drop(&mut self) {
+        T::disable();
+    }
+}
+
 impl<'d, T: Instance> embedded_hal_02::blocking::i2c::Read for I2c<'d, T> {
     type Error = Error;
 
@@ -461,7 +457,7 @@ impl Timings {
         let speed = speed.0;
         let clock = i2cclk.0;
         let freq = clock / 1_000_000;
-        assert!(freq >= 2 && freq <= 50);
+        assert!((2..=50).contains(&freq));
 
         // Configure bus frequency into I2C peripheral
         let trise = if speed <= 100_000 {
@@ -521,7 +517,8 @@ impl Timings {
 
 impl<'d, T: Instance> SetConfig for I2c<'d, T> {
     type Config = Hertz;
-    fn set_config(&mut self, config: &Self::Config) {
+    type ConfigError = ();
+    fn set_config(&mut self, config: &Self::Config) -> Result<(), ()> {
         let timings = Timings::new(T::frequency(), *config);
         T::regs().cr2().modify(|reg| {
             reg.set_freq(timings.freq);
@@ -534,5 +531,7 @@ impl<'d, T: Instance> SetConfig for I2c<'d, T> {
         T::regs().trise().modify(|reg| {
             reg.set_trise(timings.trise);
         });
+
+        Ok(())
     }
 }

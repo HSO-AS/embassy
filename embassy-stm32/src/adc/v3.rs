@@ -1,4 +1,4 @@
-use embassy_hal_common::into_ref;
+use embassy_hal_internal::into_ref;
 use embedded_hal_02::blocking::delay::DelayUs;
 
 use crate::adc::{Adc, AdcPin, Instance, Resolution, SampleTime};
@@ -9,26 +9,13 @@ pub const VREF_DEFAULT_MV: u32 = 3300;
 /// VREF voltage used for factory calibration of VREFINTCAL register.
 pub const VREF_CALIB_MV: u32 = 3000;
 
-/// Sadly we cannot use `RccPeripheral::enable` since devices are quite inconsistent ADC clock
-/// configuration.
-fn enable() {
-    critical_section::with(|_| {
-        #[cfg(stm32h7)]
-        crate::pac::RCC.apb2enr().modify(|w| w.set_adcen(true));
-        #[cfg(stm32g0)]
-        crate::pac::RCC.apbenr2().modify(|w| w.set_adcen(true));
-        #[cfg(any(stm32l4, stm32l5, stm32wb))]
-        crate::pac::RCC.ahb2enr().modify(|w| w.set_adcen(true));
-    });
-}
-
 pub struct VrefInt;
 impl<T: Instance> AdcPin<T> for VrefInt {}
 impl<T: Instance> super::sealed::AdcPin<T> for VrefInt {
     fn channel(&self) -> u8 {
-        #[cfg(not(stm32g0))]
+        #[cfg(not(adc_g0))]
         let val = 0;
-        #[cfg(stm32g0)]
+        #[cfg(adc_g0)]
         let val = 13;
         val
     }
@@ -38,9 +25,9 @@ pub struct Temperature;
 impl<T: Instance> AdcPin<T> for Temperature {}
 impl<T: Instance> super::sealed::AdcPin<T> for Temperature {
     fn channel(&self) -> u8 {
-        #[cfg(not(stm32g0))]
+        #[cfg(not(adc_g0))]
         let val = 17;
-        #[cfg(stm32g0)]
+        #[cfg(adc_g0)]
         let val = 12;
         val
     }
@@ -50,9 +37,9 @@ pub struct Vbat;
 impl<T: Instance> AdcPin<T> for Vbat {}
 impl<T: Instance> super::sealed::AdcPin<T> for Vbat {
     fn channel(&self) -> u8 {
-        #[cfg(not(stm32g0))]
+        #[cfg(not(adc_g0))]
         let val = 18;
-        #[cfg(stm32g0)]
+        #[cfg(adc_g0)]
         let val = 14;
         val
     }
@@ -61,7 +48,7 @@ impl<T: Instance> super::sealed::AdcPin<T> for Vbat {
 impl<'d, T: Instance> Adc<'d, T> {
     pub fn new(adc: impl Peripheral<P = T> + 'd, delay: &mut impl DelayUs<u32>) -> Self {
         into_ref!(adc);
-        enable();
+        T::enable_and_reset();
         T::regs().cr().modify(|reg| {
             #[cfg(not(adc_g0))]
             reg.set_deeppwd(false);
@@ -92,7 +79,12 @@ impl<'d, T: Instance> Adc<'d, T> {
     }
 
     pub fn enable_vrefint(&self, delay: &mut impl DelayUs<u32>) -> VrefInt {
+        #[cfg(not(adc_g0))]
         T::common_regs().ccr().modify(|reg| {
+            reg.set_vrefen(true);
+        });
+        #[cfg(adc_g0)]
+        T::regs().ccr().modify(|reg| {
             reg.set_vrefen(true);
         });
 
@@ -106,16 +98,26 @@ impl<'d, T: Instance> Adc<'d, T> {
     }
 
     pub fn enable_temperature(&self) -> Temperature {
+        #[cfg(not(adc_g0))]
         T::common_regs().ccr().modify(|reg| {
             reg.set_ch17sel(true);
+        });
+        #[cfg(adc_g0)]
+        T::regs().ccr().modify(|reg| {
+            reg.set_tsen(true);
         });
 
         Temperature {}
     }
 
     pub fn enable_vbat(&self) -> Vbat {
+        #[cfg(not(adc_g0))]
         T::common_regs().ccr().modify(|reg| {
             reg.set_ch18sel(true);
+        });
+        #[cfg(adc_g0)]
+        T::regs().ccr().modify(|reg| {
+            reg.set_vbaten(true);
         });
 
         Vbat {}
@@ -126,9 +128,9 @@ impl<'d, T: Instance> Adc<'d, T> {
     }
 
     pub fn set_resolution(&mut self, resolution: Resolution) {
-        #[cfg(not(stm32g0))]
+        #[cfg(not(adc_g0))]
         T::regs().cfgr().modify(|reg| reg.set_res(resolution.into()));
-        #[cfg(stm32g0)]
+        #[cfg(adc_g0)]
         T::regs().cfgr1().modify(|reg| reg.set_res(resolution.into()));
     }
 
@@ -182,9 +184,9 @@ impl<'d, T: Instance> Adc<'d, T> {
         Self::set_channel_sample_time(pin.channel(), self.sample_time);
 
         // Select channel
-        #[cfg(not(stm32g0))]
+        #[cfg(not(adc_g0))]
         T::regs().sqr1().write(|reg| reg.set_sq(0, pin.channel()));
-        #[cfg(stm32g0)]
+        #[cfg(adc_g0)]
         T::regs().chselr().write(|reg| reg.set_chsel(1 << pin.channel()));
 
         // Some models are affected by an erratum:
@@ -203,12 +205,12 @@ impl<'d, T: Instance> Adc<'d, T> {
         val
     }
 
-    #[cfg(stm32g0)]
+    #[cfg(adc_g0)]
     fn set_channel_sample_time(_ch: u8, sample_time: SampleTime) {
         T::regs().smpr().modify(|reg| reg.set_smp1(sample_time.into()));
     }
 
-    #[cfg(not(stm32g0))]
+    #[cfg(not(adc_g0))]
     fn set_channel_sample_time(ch: u8, sample_time: SampleTime) {
         let sample_time = sample_time.into();
         T::regs()

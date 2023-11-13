@@ -2,7 +2,7 @@ use core::future::poll_fn;
 use core::slice;
 use core::task::Poll;
 
-use embassy_hal_common::atomic_ring_buffer::RingBuffer;
+use embassy_hal_internal::atomic_ring_buffer::RingBuffer;
 use embassy_sync::waitqueue::AtomicWaker;
 
 use super::*;
@@ -114,6 +114,33 @@ pub struct BufferedUartRx<'d, T: BasicInstance> {
     phantom: PhantomData<&'d mut T>,
 }
 
+impl<'d, T: BasicInstance> SetConfig for BufferedUart<'d, T> {
+    type Config = Config;
+    type ConfigError = ConfigError;
+
+    fn set_config(&mut self, config: &Self::Config) -> Result<(), Self::ConfigError> {
+        self.set_config(config)
+    }
+}
+
+impl<'d, T: BasicInstance> SetConfig for BufferedUartRx<'d, T> {
+    type Config = Config;
+    type ConfigError = ConfigError;
+
+    fn set_config(&mut self, config: &Self::Config) -> Result<(), Self::ConfigError> {
+        self.set_config(config)
+    }
+}
+
+impl<'d, T: BasicInstance> SetConfig for BufferedUartTx<'d, T> {
+    type Config = Config;
+    type ConfigError = ConfigError;
+
+    fn set_config(&mut self, config: &Self::Config) -> Result<(), Self::ConfigError> {
+        self.set_config(config)
+    }
+}
+
 impl<'d, T: BasicInstance> BufferedUart<'d, T> {
     pub fn new(
         peri: impl Peripheral<P = T> + 'd,
@@ -123,9 +150,10 @@ impl<'d, T: BasicInstance> BufferedUart<'d, T> {
         tx_buffer: &'d mut [u8],
         rx_buffer: &'d mut [u8],
         config: Config,
-    ) -> BufferedUart<'d, T> {
-        T::enable();
-        T::reset();
+    ) -> Result<Self, ConfigError> {
+        // UartRx and UartTx have one refcount ea.
+        T::enable_and_reset();
+        T::enable_and_reset();
 
         Self::new_inner(peri, rx, tx, tx_buffer, rx_buffer, config)
     }
@@ -140,11 +168,12 @@ impl<'d, T: BasicInstance> BufferedUart<'d, T> {
         tx_buffer: &'d mut [u8],
         rx_buffer: &'d mut [u8],
         config: Config,
-    ) -> BufferedUart<'d, T> {
+    ) -> Result<Self, ConfigError> {
         into_ref!(cts, rts);
 
-        T::enable();
-        T::reset();
+        // UartRx and UartTx have one refcount ea.
+        T::enable_and_reset();
+        T::enable_and_reset();
 
         rts.set_as_af(rts.af_num(), AFType::OutputPushPull);
         cts.set_as_af(cts.af_num(), AFType::Input);
@@ -166,11 +195,12 @@ impl<'d, T: BasicInstance> BufferedUart<'d, T> {
         tx_buffer: &'d mut [u8],
         rx_buffer: &'d mut [u8],
         config: Config,
-    ) -> BufferedUart<'d, T> {
+    ) -> Result<Self, ConfigError> {
         into_ref!(de);
 
-        T::enable();
-        T::reset();
+        // UartRx and UartTx have one refcount ea.
+        T::enable_and_reset();
+        T::enable_and_reset();
 
         de.set_as_af(de.af_num(), AFType::OutputPushPull);
         T::regs().cr3().write(|w| {
@@ -187,7 +217,7 @@ impl<'d, T: BasicInstance> BufferedUart<'d, T> {
         tx_buffer: &'d mut [u8],
         rx_buffer: &'d mut [u8],
         config: Config,
-    ) -> BufferedUart<'d, T> {
+    ) -> Result<Self, ConfigError> {
         into_ref!(_peri, rx, tx);
 
         let state = T::buffered_state();
@@ -200,12 +230,9 @@ impl<'d, T: BasicInstance> BufferedUart<'d, T> {
         rx.set_as_af(rx.af_num(), AFType::Input);
         tx.set_as_af(tx.af_num(), AFType::OutputPushPull);
 
-        configure(r, &config, T::frequency(), T::KIND, true, true);
+        configure(r, &config, T::frequency(), T::KIND, true, true)?;
 
         r.cr1().modify(|w| {
-            #[cfg(lpuart_v2)]
-            w.set_fifoen(true);
-
             w.set_rxneie(true);
             w.set_idleie(true);
         });
@@ -213,14 +240,25 @@ impl<'d, T: BasicInstance> BufferedUart<'d, T> {
         T::Interrupt::unpend();
         unsafe { T::Interrupt::enable() };
 
-        Self {
+        Ok(Self {
             rx: BufferedUartRx { phantom: PhantomData },
             tx: BufferedUartTx { phantom: PhantomData },
-        }
+        })
     }
 
     pub fn split(self) -> (BufferedUartTx<'d, T>, BufferedUartRx<'d, T>) {
         (self.tx, self.rx)
+    }
+
+    pub fn set_config(&mut self, config: &Config) -> Result<(), ConfigError> {
+        reconfigure::<T>(config)?;
+
+        T::regs().cr1().modify(|w| {
+            w.set_rxneie(true);
+            w.set_idleie(true);
+        });
+
+        Ok(())
     }
 }
 
@@ -298,6 +336,17 @@ impl<'d, T: BasicInstance> BufferedUartRx<'d, T> {
             T::Interrupt::pend();
         }
     }
+
+    pub fn set_config(&mut self, config: &Config) -> Result<(), ConfigError> {
+        reconfigure::<T>(config)?;
+
+        T::regs().cr1().modify(|w| {
+            w.set_rxneie(true);
+            w.set_idleie(true);
+        });
+
+        Ok(())
+    }
 }
 
 impl<'d, T: BasicInstance> BufferedUartTx<'d, T> {
@@ -368,6 +417,17 @@ impl<'d, T: BasicInstance> BufferedUartTx<'d, T> {
             }
         }
     }
+
+    pub fn set_config(&mut self, config: &Config) -> Result<(), ConfigError> {
+        reconfigure::<T>(config)?;
+
+        T::regs().cr1().modify(|w| {
+            w.set_rxneie(true);
+            w.set_idleie(true);
+        });
+
+        Ok(())
+    }
 }
 
 impl<'d, T: BasicInstance> Drop for BufferedUartRx<'d, T> {
@@ -382,6 +442,8 @@ impl<'d, T: BasicInstance> Drop for BufferedUartRx<'d, T> {
                 T::Interrupt::disable();
             }
         }
+
+        T::disable();
     }
 }
 
@@ -397,40 +459,36 @@ impl<'d, T: BasicInstance> Drop for BufferedUartTx<'d, T> {
                 T::Interrupt::disable();
             }
         }
+
+        T::disable();
     }
 }
 
-impl embedded_io::Error for Error {
-    fn kind(&self) -> embedded_io::ErrorKind {
-        embedded_io::ErrorKind::Other
-    }
-}
-
-impl<'d, T: BasicInstance> embedded_io::Io for BufferedUart<'d, T> {
+impl<'d, T: BasicInstance> embedded_io_async::ErrorType for BufferedUart<'d, T> {
     type Error = Error;
 }
 
-impl<'d, T: BasicInstance> embedded_io::Io for BufferedUartRx<'d, T> {
+impl<'d, T: BasicInstance> embedded_io_async::ErrorType for BufferedUartRx<'d, T> {
     type Error = Error;
 }
 
-impl<'d, T: BasicInstance> embedded_io::Io for BufferedUartTx<'d, T> {
+impl<'d, T: BasicInstance> embedded_io_async::ErrorType for BufferedUartTx<'d, T> {
     type Error = Error;
 }
 
-impl<'d, T: BasicInstance> embedded_io::asynch::Read for BufferedUart<'d, T> {
+impl<'d, T: BasicInstance> embedded_io_async::Read for BufferedUart<'d, T> {
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
         self.rx.read(buf).await
     }
 }
 
-impl<'d, T: BasicInstance> embedded_io::asynch::Read for BufferedUartRx<'d, T> {
+impl<'d, T: BasicInstance> embedded_io_async::Read for BufferedUartRx<'d, T> {
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
         Self::read(self, buf).await
     }
 }
 
-impl<'d, T: BasicInstance> embedded_io::asynch::BufRead for BufferedUart<'d, T> {
+impl<'d, T: BasicInstance> embedded_io_async::BufRead for BufferedUart<'d, T> {
     async fn fill_buf(&mut self) -> Result<&[u8], Self::Error> {
         self.rx.fill_buf().await
     }
@@ -440,7 +498,7 @@ impl<'d, T: BasicInstance> embedded_io::asynch::BufRead for BufferedUart<'d, T> 
     }
 }
 
-impl<'d, T: BasicInstance> embedded_io::asynch::BufRead for BufferedUartRx<'d, T> {
+impl<'d, T: BasicInstance> embedded_io_async::BufRead for BufferedUartRx<'d, T> {
     async fn fill_buf(&mut self) -> Result<&[u8], Self::Error> {
         Self::fill_buf(self).await
     }
@@ -450,7 +508,7 @@ impl<'d, T: BasicInstance> embedded_io::asynch::BufRead for BufferedUartRx<'d, T
     }
 }
 
-impl<'d, T: BasicInstance> embedded_io::asynch::Write for BufferedUart<'d, T> {
+impl<'d, T: BasicInstance> embedded_io_async::Write for BufferedUart<'d, T> {
     async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
         self.tx.write(buf).await
     }
@@ -460,7 +518,7 @@ impl<'d, T: BasicInstance> embedded_io::asynch::Write for BufferedUart<'d, T> {
     }
 }
 
-impl<'d, T: BasicInstance> embedded_io::asynch::Write for BufferedUartTx<'d, T> {
+impl<'d, T: BasicInstance> embedded_io_async::Write for BufferedUartTx<'d, T> {
     async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
         Self::write(self, buf).await
     }
@@ -470,19 +528,19 @@ impl<'d, T: BasicInstance> embedded_io::asynch::Write for BufferedUartTx<'d, T> 
     }
 }
 
-impl<'d, T: BasicInstance> embedded_io::blocking::Read for BufferedUart<'d, T> {
+impl<'d, T: BasicInstance> embedded_io::Read for BufferedUart<'d, T> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
         self.rx.blocking_read(buf)
     }
 }
 
-impl<'d, T: BasicInstance> embedded_io::blocking::Read for BufferedUartRx<'d, T> {
+impl<'d, T: BasicInstance> embedded_io::Read for BufferedUartRx<'d, T> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
         self.blocking_read(buf)
     }
 }
 
-impl<'d, T: BasicInstance> embedded_io::blocking::Write for BufferedUart<'d, T> {
+impl<'d, T: BasicInstance> embedded_io::Write for BufferedUart<'d, T> {
     fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
         self.tx.blocking_write(buf)
     }
@@ -492,7 +550,7 @@ impl<'d, T: BasicInstance> embedded_io::blocking::Write for BufferedUart<'d, T> 
     }
 }
 
-impl<'d, T: BasicInstance> embedded_io::blocking::Write for BufferedUartTx<'d, T> {
+impl<'d, T: BasicInstance> embedded_io::Write for BufferedUartTx<'d, T> {
     fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
         Self::blocking_write(self, buf)
     }
@@ -584,31 +642,21 @@ mod eh02 {
 mod eh1 {
     use super::*;
 
-    impl<'d, T: BasicInstance> embedded_hal_1::serial::ErrorType for BufferedUart<'d, T> {
+    impl<'d, T: BasicInstance> embedded_hal_nb::serial::ErrorType for BufferedUart<'d, T> {
         type Error = Error;
     }
 
-    impl<'d, T: BasicInstance> embedded_hal_1::serial::ErrorType for BufferedUartTx<'d, T> {
+    impl<'d, T: BasicInstance> embedded_hal_nb::serial::ErrorType for BufferedUartTx<'d, T> {
         type Error = Error;
     }
 
-    impl<'d, T: BasicInstance> embedded_hal_1::serial::ErrorType for BufferedUartRx<'d, T> {
+    impl<'d, T: BasicInstance> embedded_hal_nb::serial::ErrorType for BufferedUartRx<'d, T> {
         type Error = Error;
     }
 
     impl<'d, T: BasicInstance> embedded_hal_nb::serial::Read for BufferedUartRx<'d, T> {
         fn read(&mut self) -> nb::Result<u8, Self::Error> {
             embedded_hal_02::serial::Read::read(self)
-        }
-    }
-
-    impl<'d, T: BasicInstance> embedded_hal_1::serial::Write for BufferedUartTx<'d, T> {
-        fn write(&mut self, buffer: &[u8]) -> Result<(), Self::Error> {
-            self.blocking_write(buffer).map(drop)
-        }
-
-        fn flush(&mut self) -> Result<(), Self::Error> {
-            self.blocking_flush()
         }
     }
 
@@ -625,16 +673,6 @@ mod eh1 {
     impl<'d, T: BasicInstance> embedded_hal_nb::serial::Read for BufferedUart<'d, T> {
         fn read(&mut self) -> Result<u8, nb::Error<Self::Error>> {
             embedded_hal_02::serial::Read::read(&mut self.rx)
-        }
-    }
-
-    impl<'d, T: BasicInstance> embedded_hal_1::serial::Write for BufferedUart<'d, T> {
-        fn write(&mut self, buffer: &[u8]) -> Result<(), Self::Error> {
-            self.tx.blocking_write(buffer).map(drop)
-        }
-
-        fn flush(&mut self) -> Result<(), Self::Error> {
-            self.tx.blocking_flush()
         }
     }
 

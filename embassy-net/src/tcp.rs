@@ -82,6 +82,22 @@ impl<'a> TcpReader<'a> {
     pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Error> {
         self.io.read(buf).await
     }
+
+    /// Call `f` with the largest contiguous slice of octets in the receive buffer,
+    /// and dequeue the amount of elements returned by `f`.
+    ///
+    /// If no data is available, it waits until there is at least one byte available.
+    pub async fn read_with<F, R>(&mut self, f: F) -> Result<R, Error>
+    where
+        F: FnOnce(&mut [u8]) -> (usize, R),
+    {
+        self.io.read_with(f).await
+    }
+
+    /// Return the maximum number of bytes inside the transmit buffer.
+    pub fn recv_capacity(&self) -> usize {
+        self.io.recv_capacity()
+    }
 }
 
 impl<'a> TcpWriter<'a> {
@@ -99,6 +115,22 @@ impl<'a> TcpWriter<'a> {
     /// closed with [`abort()`](TcpSocket::abort) it will wait for the TCP RST packet to be sent.
     pub async fn flush(&mut self) -> Result<(), Error> {
         self.io.flush().await
+    }
+
+    /// Call `f` with the largest contiguous slice of octets in the transmit buffer,
+    /// and enqueue the amount of elements returned by `f`.
+    ///
+    /// If the socket is not ready to accept data, it waits until it is.
+    pub async fn write_with<F, R>(&mut self, f: F) -> Result<R, Error>
+    where
+        F: FnOnce(&mut [u8]) -> (usize, R),
+    {
+        self.io.write_with(f).await
+    }
+
+    /// Return the maximum number of bytes inside the transmit buffer.
+    pub fn send_capacity(&self) -> usize {
+        self.io.send_capacity()
     }
 }
 
@@ -119,6 +151,38 @@ impl<'a> TcpSocket<'a> {
                 handle,
             },
         }
+    }
+
+    /// Return the maximum number of bytes inside the recv buffer.
+    pub fn recv_capacity(&self) -> usize {
+        self.io.recv_capacity()
+    }
+
+    /// Return the maximum number of bytes inside the transmit buffer.
+    pub fn send_capacity(&self) -> usize {
+        self.io.send_capacity()
+    }
+
+    /// Call `f` with the largest contiguous slice of octets in the transmit buffer,
+    /// and enqueue the amount of elements returned by `f`.
+    ///
+    /// If the socket is not ready to accept data, it waits until it is.
+    pub async fn write_with<F, R>(&mut self, f: F) -> Result<R, Error>
+    where
+        F: FnOnce(&mut [u8]) -> (usize, R),
+    {
+        self.io.write_with(f).await
+    }
+
+    /// Call `f` with the largest contiguous slice of octets in the receive buffer,
+    /// and dequeue the amount of elements returned by `f`.
+    ///
+    /// If no data is available, it waits until there is at least one byte available.
+    pub async fn read_with<F, R>(&mut self, f: F) -> Result<R, Error>
+    where
+        F: FnOnce(&mut [u8]) -> (usize, R),
+    {
+        self.io.read_with(f).await
     }
 
     /// Split the socket into reader and a writer halves.
@@ -326,6 +390,13 @@ impl<'d> TcpIo<'d> {
             // CAUTION: smoltcp semantics around EOF are different to what you'd expect
             // from posix-like IO, so we have to tweak things here.
             self.with_mut(|s, _| match s.recv_slice(buf) {
+                // Reading into empty buffer
+                Ok(0) if buf.is_empty() => {
+                    // embedded_io_async::Read's contract is to not block if buf is empty. While
+                    // this function is not a direct implementor of the trait method, we still don't
+                    // want our future to never resolve.
+                    Poll::Ready(Ok(0))
+                }
                 // No data ready
                 Ok(0) => {
                     s.register_recv_waker(cx.waker());
@@ -359,6 +430,64 @@ impl<'d> TcpIo<'d> {
         .await
     }
 
+    async fn write_with<F, R>(&mut self, f: F) -> Result<R, Error>
+    where
+        F: FnOnce(&mut [u8]) -> (usize, R),
+    {
+        let mut f = Some(f);
+        poll_fn(move |cx| {
+            self.with_mut(|s, _| {
+                if !s.can_send() {
+                    if s.may_send() {
+                        // socket buffer is full wait until it has atleast one byte free
+                        s.register_send_waker(cx.waker());
+                        Poll::Pending
+                    } else {
+                        // if we can't transmit because the transmit half of the duplex connection is closed then return an error
+                        Poll::Ready(Err(Error::ConnectionReset))
+                    }
+                } else {
+                    Poll::Ready(match s.send(unwrap!(f.take())) {
+                        // Connection reset. TODO: this can also be timeouts etc, investigate.
+                        Err(tcp::SendError::InvalidState) => Err(Error::ConnectionReset),
+                        Ok(r) => Ok(r),
+                    })
+                }
+            })
+        })
+        .await
+    }
+
+    async fn read_with<F, R>(&mut self, f: F) -> Result<R, Error>
+    where
+        F: FnOnce(&mut [u8]) -> (usize, R),
+    {
+        let mut f = Some(f);
+        poll_fn(move |cx| {
+            self.with_mut(|s, _| {
+                if !s.can_recv() {
+                    if s.may_recv() {
+                        // socket buffer is empty wait until it has atleast one byte has arrived
+                        s.register_recv_waker(cx.waker());
+                        Poll::Pending
+                    } else {
+                        // if we can't receive because the recieve half of the duplex connection is closed then return an error
+                        Poll::Ready(Err(Error::ConnectionReset))
+                    }
+                } else {
+                    Poll::Ready(match s.recv(unwrap!(f.take())) {
+                        // Connection reset. TODO: this can also be timeouts etc, investigate.
+                        Err(tcp::RecvError::Finished) | Err(tcp::RecvError::InvalidState) => {
+                            Err(Error::ConnectionReset)
+                        }
+                        Ok(r) => Ok(r),
+                    })
+                }
+            })
+        })
+        .await
+    }
+
     async fn flush(&mut self) -> Result<(), Error> {
         poll_fn(move |cx| {
             self.with_mut(|s, _| {
@@ -376,35 +505,50 @@ impl<'d> TcpIo<'d> {
         })
         .await
     }
+
+    fn recv_capacity(&self) -> usize {
+        self.with(|s, _| s.recv_capacity())
+    }
+
+    fn send_capacity(&self) -> usize {
+        self.with(|s, _| s.send_capacity())
+    }
 }
 
 #[cfg(feature = "nightly")]
 mod embedded_io_impls {
     use super::*;
 
-    impl embedded_io::Error for ConnectError {
-        fn kind(&self) -> embedded_io::ErrorKind {
-            embedded_io::ErrorKind::Other
+    impl embedded_io_async::Error for ConnectError {
+        fn kind(&self) -> embedded_io_async::ErrorKind {
+            match self {
+                ConnectError::ConnectionReset => embedded_io_async::ErrorKind::ConnectionReset,
+                ConnectError::TimedOut => embedded_io_async::ErrorKind::TimedOut,
+                ConnectError::NoRoute => embedded_io_async::ErrorKind::NotConnected,
+                ConnectError::InvalidState => embedded_io_async::ErrorKind::Other,
+            }
         }
     }
 
-    impl embedded_io::Error for Error {
-        fn kind(&self) -> embedded_io::ErrorKind {
-            embedded_io::ErrorKind::Other
+    impl embedded_io_async::Error for Error {
+        fn kind(&self) -> embedded_io_async::ErrorKind {
+            match self {
+                Error::ConnectionReset => embedded_io_async::ErrorKind::ConnectionReset,
+            }
         }
     }
 
-    impl<'d> embedded_io::Io for TcpSocket<'d> {
+    impl<'d> embedded_io_async::ErrorType for TcpSocket<'d> {
         type Error = Error;
     }
 
-    impl<'d> embedded_io::asynch::Read for TcpSocket<'d> {
+    impl<'d> embedded_io_async::Read for TcpSocket<'d> {
         async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
             self.io.read(buf).await
         }
     }
 
-    impl<'d> embedded_io::asynch::Write for TcpSocket<'d> {
+    impl<'d> embedded_io_async::Write for TcpSocket<'d> {
         async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
             self.io.write(buf).await
         }
@@ -414,21 +558,21 @@ mod embedded_io_impls {
         }
     }
 
-    impl<'d> embedded_io::Io for TcpReader<'d> {
+    impl<'d> embedded_io_async::ErrorType for TcpReader<'d> {
         type Error = Error;
     }
 
-    impl<'d> embedded_io::asynch::Read for TcpReader<'d> {
+    impl<'d> embedded_io_async::Read for TcpReader<'d> {
         async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
             self.io.read(buf).await
         }
     }
 
-    impl<'d> embedded_io::Io for TcpWriter<'d> {
+    impl<'d> embedded_io_async::ErrorType for TcpWriter<'d> {
         type Error = Error;
     }
 
-    impl<'d> embedded_io::asynch::Write for TcpWriter<'d> {
+    impl<'d> embedded_io_async::Write for TcpWriter<'d> {
         async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
             self.io.write(buf).await
         }
@@ -440,13 +584,12 @@ mod embedded_io_impls {
 }
 
 /// TCP client compatible with `embedded-nal-async` traits.
-#[cfg(all(feature = "unstable-traits", feature = "nightly"))]
+#[cfg(feature = "nightly")]
 pub mod client {
-    use core::cell::UnsafeCell;
+    use core::cell::{Cell, UnsafeCell};
     use core::mem::MaybeUninit;
     use core::ptr::NonNull;
 
-    use atomic_polyfill::{AtomicBool, Ordering};
     use embedded_nal_async::IpAddr;
 
     use super::*;
@@ -475,10 +618,7 @@ pub mod client {
         async fn connect<'a>(
             &'a self,
             remote: embedded_nal_async::SocketAddr,
-        ) -> Result<Self::Connection<'a>, Self::Error>
-        where
-            Self: 'a,
-        {
+        ) -> Result<Self::Connection<'a>, Self::Error> {
             let addr: crate::IpAddress = match remote.ip() {
                 #[cfg(feature = "proto-ipv4")]
                 IpAddr::V4(addr) => crate::IpAddress::Ipv4(crate::Ipv4Address::from_bytes(&addr.octets())),
@@ -527,13 +667,13 @@ pub mod client {
         }
     }
 
-    impl<'d, const N: usize, const TX_SZ: usize, const RX_SZ: usize> embedded_io::Io
+    impl<'d, const N: usize, const TX_SZ: usize, const RX_SZ: usize> embedded_io_async::ErrorType
         for TcpConnection<'d, N, TX_SZ, RX_SZ>
     {
         type Error = Error;
     }
 
-    impl<'d, const N: usize, const TX_SZ: usize, const RX_SZ: usize> embedded_io::asynch::Read
+    impl<'d, const N: usize, const TX_SZ: usize, const RX_SZ: usize> embedded_io_async::Read
         for TcpConnection<'d, N, TX_SZ, RX_SZ>
     {
         async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
@@ -541,7 +681,7 @@ pub mod client {
         }
     }
 
-    impl<'d, const N: usize, const TX_SZ: usize, const RX_SZ: usize> embedded_io::asynch::Write
+    impl<'d, const N: usize, const TX_SZ: usize, const RX_SZ: usize> embedded_io_async::Write
         for TcpConnection<'d, N, TX_SZ, RX_SZ>
     {
         async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
@@ -565,15 +705,13 @@ pub mod client {
         }
     }
 
-    unsafe impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize> Sync for TcpClientState<N, TX_SZ, RX_SZ> {}
-
     struct Pool<T, const N: usize> {
-        used: [AtomicBool; N],
+        used: [Cell<bool>; N],
         data: [UnsafeCell<MaybeUninit<T>>; N],
     }
 
     impl<T, const N: usize> Pool<T, N> {
-        const VALUE: AtomicBool = AtomicBool::new(false);
+        const VALUE: Cell<bool> = Cell::new(false);
         const UNINIT: UnsafeCell<MaybeUninit<T>> = UnsafeCell::new(MaybeUninit::uninit());
 
         const fn new() -> Self {
@@ -587,7 +725,9 @@ pub mod client {
     impl<T, const N: usize> Pool<T, N> {
         fn alloc(&self) -> Option<NonNull<T>> {
             for n in 0..N {
-                if self.used[n].swap(true, Ordering::SeqCst) == false {
+                // this can't race because Pool is not Sync.
+                if !self.used[n].get() {
+                    self.used[n].set(true);
                     let p = self.data[n].get() as *mut T;
                     return Some(unsafe { NonNull::new_unchecked(p) });
                 }
@@ -601,7 +741,7 @@ pub mod client {
             let n = p.as_ptr().offset_from(origin);
             assert!(n >= 0);
             assert!((n as usize) < N);
-            self.used[n as usize].store(false, Ordering::SeqCst);
+            self.used[n as usize].set(false);
         }
     }
 }

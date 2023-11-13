@@ -1,5 +1,6 @@
 #![no_std]
 #![cfg_attr(feature = "nightly", feature(async_fn_in_trait, impl_trait_projections))]
+#![cfg_attr(feature = "nightly", allow(stable_features, unknown_lints, async_fn_in_trait))]
 #![doc = include_str!("../README.md")]
 #![warn(missing_docs)]
 
@@ -98,10 +99,11 @@ mod chip;
 /// This defines the right interrupt handlers, and creates a unit struct (like `struct Irqs;`)
 /// and implements the right [`Binding`]s for it. You can pass this struct to drivers to
 /// prove at compile-time that the right interrupts have been bound.
-// developer note: this macro can't be in `embassy-hal-common` due to the use of `$crate`.
+// developer note: this macro can't be in `embassy-hal-internal` due to the use of `$crate`.
 #[macro_export]
 macro_rules! bind_interrupts {
         ($vis:vis struct $name:ident { $($irq:ident => $($handler:ty),*;)* }) => {
+            #[derive(Copy, Clone)]
             $vis struct $name;
 
             $(
@@ -127,7 +129,7 @@ pub use chip::pac;
 #[cfg(not(feature = "unstable-pac"))]
 pub(crate) use chip::pac;
 pub use chip::{peripherals, Peripherals, EASY_DMA_SIZE};
-pub use embassy_hal_common::{into_ref, Peripheral, PeripheralRef};
+pub use embassy_hal_internal::{into_ref, Peripheral, PeripheralRef};
 
 pub use crate::chip::interrupt;
 pub use crate::pac::NVIC_PRIO_BITS;
